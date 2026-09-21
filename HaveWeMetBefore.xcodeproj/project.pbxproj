@@ -223,6 +223,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "본 적 있나";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -246,6 +247,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "본 적 있나";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
