@@ -12,6 +12,7 @@ struct PhotoVisitRecord: Identifiable, Sendable {
 struct PhotoScanSummary: Sendable {
     let totalPhotos: Int
     let validRecords: [PhotoVisitRecord]
+    let visitEvents: [VisitEvent]
     let missingLocationCount: Int
     let missingDateCount: Int
     let invalidCoordinateCount: Int
@@ -20,6 +21,7 @@ struct PhotoScanSummary: Sendable {
     static let empty = PhotoScanSummary(
         totalPhotos: 0,
         validRecords: [],
+        visitEvents: [],
         missingLocationCount: 0,
         missingDateCount: 0,
         invalidCoordinateCount: 0,
@@ -127,6 +129,7 @@ private enum PhotoLibraryScanner {
         return PhotoScanSummary(
             totalPhotos: assets.count,
             validRecords: records,
+            visitEvents: VisitEventBuilder.build(from: records),
             missingLocationCount: missingLocationCount,
             missingDateCount: missingDateCount,
             invalidCoordinateCount: invalidCoordinateCount,

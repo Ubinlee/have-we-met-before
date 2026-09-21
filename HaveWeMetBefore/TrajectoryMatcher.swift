@@ -1,5 +1,14 @@
 import Foundation
 
+protocol TrajectoryRecord: Sendable {
+    var id: String { get }
+    var capturedAt: Date { get }
+    var latitude: Double { get }
+    var longitude: Double { get }
+}
+
+extension PhotoVisitRecord: TrajectoryRecord {}
+
 enum IntersectionStrength: Int, Comparable, Sendable {
     case loose = 1
     case close = 2
@@ -42,9 +51,9 @@ struct IntersectionThresholds: Sendable {
 }
 
 enum TrajectoryMatcher {
-    static func compare(
-        first: [PhotoVisitRecord],
-        second: [PhotoVisitRecord],
+    static func compare<FirstRecord: TrajectoryRecord, SecondRecord: TrajectoryRecord>(
+        first: [FirstRecord],
+        second: [SecondRecord],
         before firstMetDate: Date,
         thresholds: IntersectionThresholds = .mvp,
         calendar: Calendar = .autoupdatingCurrent
@@ -139,20 +148,18 @@ enum TrajectoryMatcher {
         return lhs.timeDifference < rhs.timeDifference
     }
 
-    private static func distanceMeters(
-        from first: PhotoVisitRecord,
-        to second: PhotoVisitRecord
+    private static func distanceMeters<
+        FirstRecord: TrajectoryRecord,
+        SecondRecord: TrajectoryRecord
+    >(
+        from first: FirstRecord,
+        to second: SecondRecord
     ) -> Double {
-        let earthRadius = 6_371_000.0
-        let latitude1 = first.latitude * .pi / 180
-        let latitude2 = second.latitude * .pi / 180
-        let latitudeDelta = (second.latitude - first.latitude) * .pi / 180
-        let longitudeDelta = (second.longitude - first.longitude) * .pi / 180
-
-        let a = sin(latitudeDelta / 2) * sin(latitudeDelta / 2)
-            + cos(latitude1) * cos(latitude2)
-            * sin(longitudeDelta / 2) * sin(longitudeDelta / 2)
-        let c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return earthRadius * c
+        GeoDistance.meters(
+            latitude1: first.latitude,
+            longitude1: first.longitude,
+            latitude2: second.latitude,
+            longitude2: second.longitude
+        )
     }
 }

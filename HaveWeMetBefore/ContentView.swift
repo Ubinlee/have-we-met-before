@@ -127,7 +127,9 @@ struct ContentView: View {
         VStack(spacing: 0) {
             SummaryRow(title: "확인한 사진", value: analyzer.summary.totalPhotos, emphasized: false)
             Divider()
-            SummaryRow(title: "분석 가능한 기록", value: analyzer.summary.validRecords.count, emphasized: true)
+            SummaryRow(title: "분석 가능한 사진", value: analyzer.summary.validRecords.count, emphasized: false)
+            Divider()
+            SummaryRow(title: "방문 기록", value: analyzer.summary.visitEvents.count, emphasized: true)
             Divider()
             SummaryRow(title: "위치 정보 없음", value: analyzer.summary.missingLocationCount, emphasized: false)
             Divider()
