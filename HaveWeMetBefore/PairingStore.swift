@@ -13,8 +13,10 @@ final class PairingStore: ObservableObject {
     @Published var nickname = ""
     @Published var inviteID = ""
     @Published var joinInviteID = ""
+    @Published var firstMetDate = Calendar.current.startOfDay(for: Date())
     @Published private(set) var activePairID: String?
     @Published private(set) var pairStatus: String?
+    @Published private(set) var savedFirstMetDate: Date?
     @Published private(set) var uploadedRecordCount = 0
     @Published private(set) var comparisonResult: DestinyScoreResult?
     @Published private(set) var state: OperationState = .idle
@@ -26,6 +28,8 @@ final class PairingStore: ObservableObject {
     var currentPairID: String? {
         activePairID ?? (inviteID.isEmpty ? nil : inviteID)
     }
+
+    var hasSavedFirstMetDate: Bool { savedFirstMetDate != nil }
 
     func loadLatestPair(userID: String) async {
         do {
@@ -167,13 +171,58 @@ final class PairingStore: ObservableObject {
         }
     }
 
+    func saveFirstMetDate() async {
+        guard let pairID = activePairID else {
+            state = .failed(message: "먼저 친구와 연결해 주세요.")
+            return
+        }
+
+        let normalizedDate = Calendar.current.startOfDay(for: firstMetDate)
+        guard normalizedDate <= Calendar.current.startOfDay(for: Date()) else {
+            state = .failed(message: "처음 알게 된 날은 오늘 이후로 정할 수 없어요.")
+            return
+        }
+        if let savedFirstMetDate,
+           Calendar.current.isDate(savedFirstMetDate, inSameDayAs: normalizedDate) {
+            state = .succeeded(message: "이미 저장된 기준일이에요.")
+            return
+        }
+
+        state = .working
+
+        do {
+            try await database
+                .collection("pairs")
+                .document(pairID)
+                .updateData([
+                    "firstMetAt": Timestamp(date: normalizedDate),
+                    "updatedAt": FieldValue.serverTimestamp()
+                ])
+
+            firstMetDate = normalizedDate
+            savedFirstMetDate = normalizedDate
+            uploadedRecordCount = 0
+            comparisonResult = nil
+            state = .succeeded(message: "기준일을 저장했어요. 두 사람 모두 기록을 다시 올려 주세요.")
+        } catch {
+            state = .failed(message: userFacingMessage(for: error))
+        }
+    }
+
     func syncVisitsAndCompare(userID: String, events: [VisitEvent]) async {
         guard let pairID = currentPairID else {
             state = .failed(message: "먼저 친구 초대를 만들거나 수락해 주세요.")
             return
         }
 
-        let records = SharedVisitRecordBuilder.build(from: events)
+        guard let cutoffDate = savedFirstMetDate else {
+            state = .failed(message: "먼저 처음 알게 된 날을 저장해 주세요.")
+            return
+        }
+
+        let records = SharedVisitRecordBuilder.build(
+            from: events.filter { $0.capturedAt < cutoffDate }
+        )
         state = .working
 
         do {
@@ -226,18 +275,49 @@ final class PairingStore: ObservableObject {
                 return
             }
 
+            guard let firstMetTimestamp = data["firstMetAt"] as? Timestamp else {
+                savedFirstMetDate = nil
+                state = .failed(message: "먼저 처음 알게 된 날을 저장해 주세요.")
+                return
+            }
+            guard let pairUpdatedTimestamp = data["updatedAt"] as? Timestamp else {
+                state = .failed(message: "연결 정보를 다시 불러와 주세요.")
+                return
+            }
+
             activePairID = pairID
             pairStatus = "친구와 연결됐어요."
+            let cutoffDate = firstMetTimestamp.dateValue()
+            firstMetDate = cutoffDate
+            savedFirstMetDate = cutoffDate
 
-            let friendMember = try await database
+            async let ownMember = database
+                .collection("pairs")
+                .document(pairID)
+                .collection("members")
+                .document(userID)
+                .getDocument()
+            async let friendMember = database
                 .collection("pairs")
                 .document(pairID)
                 .collection("members")
                 .document(friendID)
                 .getDocument()
+            let (ownMemberSnapshot, friendMemberSnapshot) = try await (ownMember, friendMember)
 
-            guard friendMember.data()?["analysisStatus"] as? String == "ready" else {
-                state = .succeeded(message: "친구의 사진 분석을 기다리고 있어요.")
+            guard memberIsReady(
+                ownMemberSnapshot.data(),
+                updatedAfter: pairUpdatedTimestamp.dateValue()
+            ) else {
+                state = .succeeded(message: "새 기준일로 내 기록을 먼저 올려 주세요.")
+                return
+            }
+
+            guard memberIsReady(
+                friendMemberSnapshot.data(),
+                updatedAfter: pairUpdatedTimestamp.dateValue()
+            ) else {
+                state = .succeeded(message: "친구가 새 기준일로 기록을 올리길 기다리고 있어요.")
                 return
             }
 
@@ -247,8 +327,12 @@ final class PairingStore: ObservableObject {
                 .getDocuments()
             let (ownDocuments, friendDocuments) = try await (ownSnapshot, friendSnapshot)
 
-            let ownRecords = ownDocuments.documents.compactMap(sharedVisitRecord)
-            let friendRecords = friendDocuments.documents.compactMap(sharedVisitRecord)
+            let ownRecords = ownDocuments.documents
+                .compactMap(sharedVisitRecord)
+                .filter { $0.approximateDate < cutoffDate }
+            let friendRecords = friendDocuments.documents
+                .compactMap(sharedVisitRecord)
+                .filter { $0.approximateDate < cutoffDate }
             let intersections = SharedTrajectoryMatcher.compare(
                 first: ownRecords,
                 second: friendRecords
@@ -357,6 +441,14 @@ final class PairingStore: ObservableObject {
             ])
     }
 
+    private func memberIsReady(_ data: [String: Any]?, updatedAfter cutoff: Date) -> Bool {
+        guard data?["analysisStatus"] as? String == "ready",
+              let timestamp = data?["updatedAt"] as? Timestamp else {
+            return false
+        }
+        return timestamp.dateValue() >= cutoff
+    }
+
     private func visitsCollection(pairID: String, userID: String) -> CollectionReference {
         database.collection("pairs").document(pairID)
             .collection("members").document(userID)
@@ -391,6 +483,14 @@ final class PairingStore: ObservableObject {
         } else {
             activePairID = nil
             pairStatus = "친구의 수락을 기다리고 있어요."
+        }
+
+        if let timestamp = data["firstMetAt"] as? Timestamp {
+            let date = timestamp.dateValue()
+            firstMetDate = date
+            savedFirstMetDate = date
+        } else {
+            savedFirstMetDate = nil
         }
     }
 

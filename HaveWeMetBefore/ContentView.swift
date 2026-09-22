@@ -137,6 +137,34 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if pairing.activePairID != nil {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("처음 알게 된 날", systemImage: "calendar")
+                            .font(.subheadline.weight(.semibold))
+
+                        DatePicker(
+                            "처음 알게 된 날",
+                            selection: $pairing.firstMetDate,
+                            in: ...Date(),
+                            displayedComponents: .date
+                        )
+                        .labelsHidden()
+
+                        Text("이 날짜 당일과 이후 기록은 제외하고, 이전 기록만 비교해요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button(pairing.hasSavedFirstMetDate ? "기준일 변경 저장" : "기준일 저장") {
+                            Task { await pairing.saveFirstMetDate() }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(pairing.isWorking)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+
                 HStack {
                     Button("연결 상태 새로고침") {
                         Task { await pairing.loadLatestPair(userID: userID) }
@@ -152,14 +180,22 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(pairing.isWorking || analyzer.scanState != .finished)
+                    .disabled(
+                        pairing.isWorking
+                            || analyzer.scanState != .finished
+                            || !pairing.hasSavedFirstMetDate
+                    )
                 }
 
                 Button("친구 기록 다시 확인") {
                     Task { await pairing.compareWithFriend(userID: userID) }
                 }
                 .buttonStyle(.bordered)
-                .disabled(pairing.isWorking || pairing.activePairID == nil)
+                .disabled(
+                    pairing.isWorking
+                        || pairing.activePairID == nil
+                        || !pairing.hasSavedFirstMetDate
+                )
 
                 if pairing.uploadedRecordCount > 0 {
                     Text("서버에 올린 흐린 방문 기록: \(pairing.uploadedRecordCount)개")
