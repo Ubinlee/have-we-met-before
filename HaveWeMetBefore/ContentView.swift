@@ -4,6 +4,8 @@ import UIKit
 
 struct ContentView: View {
     @StateObject private var analyzer = PhotoLibraryAnalyzer()
+    @StateObject private var pairing = PairingStore()
+    @EnvironmentObject private var firebaseSession: FirebaseSession
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -11,12 +13,13 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 24) {
                     header
+                    accountCard
                     content
                 }
                 .frame(maxWidth: .infinity)
                 .padding(24)
             }
-            .navigationTitle("사진 기록 확인")
+            .navigationTitle("내 기록 준비")
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 if analyzer.canReadPhotos, analyzer.scanState == .idle {
@@ -29,19 +32,121 @@ struct ContentView: View {
 
     private var header: some View {
         VStack(spacing: 12) {
-            Image(systemName: "photo.stack")
+            Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 52, weight: .light))
                 .foregroundStyle(.tint)
                 .accessibilityHidden(true)
 
-            Text("사진 속 시간과 위치만 확인해요")
+            Text("우리가 전에 스친 적 있을까?")
                 .font(.title2.bold())
                 .multilineTextAlignment(.center)
 
-            Text("사진 원본은 업로드하지 않으며, 이 단계에서는 분석 결과도 기기 밖으로 전송하지 않아요.")
+            Text("사진 원본은 업로드하지 않고, 시간과 위치를 흐린 기록만 친구와 비교해요.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+        }
+    }
+
+    @ViewBuilder
+    private var accountCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("친구와 연결하기", systemImage: "person.2")
+                .font(.headline)
+
+            switch firebaseSession.state {
+            case .idle, .signingIn:
+                ProgressView("익명 계정을 준비하고 있어요")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .failed(let message):
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+
+                Button("다시 연결하기") {
+                    Task { await firebaseSession.signInIfNeeded() }
+                }
+                .buttonStyle(.bordered)
+
+            case .authenticated(let userID):
+                pairingControls(userID: userID)
+            }
+        }
+        .cardStyle()
+    }
+
+    private func pairingControls(userID: String) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("닉네임", text: $pairing.nickname)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button("프로필 저장") {
+                    Task { _ = await pairing.saveProfile(userID: userID) }
+                }
+                .buttonStyle(.bordered)
+
+                Button("초대 만들기") {
+                    Task { await pairing.createPair(userID: userID) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .disabled(pairing.isWorking)
+
+            if !pairing.inviteID.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("초대 ID")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text(pairing.inviteID)
+                        .font(.footnote.monospaced())
+                        .textSelection(.enabled)
+
+                    ShareLink(item: pairing.inviteID) {
+                        Label("초대 ID 공유", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+
+            Divider()
+
+            TextField("받은 초대 ID", text: $pairing.joinInviteID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textFieldStyle(.roundedBorder)
+
+            Button("초대 수락하기") {
+                Task { await pairing.acceptPair(userID: userID) }
+            }
+            .buttonStyle(.bordered)
+            .disabled(pairing.isWorking)
+
+            pairingStatus
+        }
+    }
+
+    @ViewBuilder
+    private var pairingStatus: some View {
+        switch pairing.state {
+        case .idle:
+            EmptyView()
+        case .working:
+            ProgressView("Firebase에 저장하고 있어요")
+        case .succeeded(let message):
+            Label(message, systemImage: "checkmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(.green)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote)
+                .foregroundStyle(.red)
         }
     }
 
@@ -170,4 +275,5 @@ private extension View {
 
 #Preview {
     ContentView()
+        .environmentObject(FirebaseSession())
 }
