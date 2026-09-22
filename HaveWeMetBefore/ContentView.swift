@@ -128,7 +128,91 @@ struct ContentView: View {
             .buttonStyle(.bordered)
             .disabled(pairing.isWorking)
 
+            if pairing.currentPairID != nil {
+                Divider()
+
+                if let pairStatus = pairing.pairStatus {
+                    Label(pairStatus, systemImage: pairing.activePairID == nil ? "clock" : "person.2.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("연결 상태 새로고침") {
+                        Task { await pairing.loadLatestPair(userID: userID) }
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("기록 올리고 비교") {
+                        Task {
+                            await pairing.syncVisitsAndCompare(
+                                userID: userID,
+                                events: analyzer.summary.visitEvents
+                            )
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(pairing.isWorking || analyzer.scanState != .finished)
+                }
+
+                Button("친구 기록 다시 확인") {
+                    Task { await pairing.compareWithFriend(userID: userID) }
+                }
+                .buttonStyle(.bordered)
+                .disabled(pairing.isWorking || pairing.activePairID == nil)
+
+                if pairing.uploadedRecordCount > 0 {
+                    Text("서버에 올린 흐린 방문 기록: \(pairing.uploadedRecordCount)개")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let result = pairing.comparisonResult {
+                    comparisonCard(result)
+                }
+            }
+
             pairingStatus
+        }
+        .task(id: userID) {
+            await pairing.loadLatestPair(userID: userID)
+        }
+    }
+
+    private func comparisonCard(_ result: DestinyScoreResult) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("흐린 기록 비교 결과")
+                .font(.headline)
+
+            Text("운명 점수 \(result.score)점")
+                .font(.title3.bold())
+                .foregroundStyle(.tint)
+
+            Text("겹친 날짜 \(result.totalIntersectionDayCount)일")
+                .font(.subheadline)
+
+            if let closest = result.closestIntersection {
+                Text("가장 가까운 기록: \(strengthLabel(closest.strength))")
+                    .font(.subheadline)
+            }
+
+            Text("약 1km 지역과 3시간 구간으로 흐린 기록을 비교한 재미 요소예요.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func strengthLabel(_ strength: IntersectionStrength) -> String {
+        switch strength {
+        case .strong:
+            "같은 시간대·같은 지역"
+        case .close:
+            "가까운 시간대·인접 지역"
+        case .loose:
+            "같은 날·가까운 지역"
         }
     }
 
