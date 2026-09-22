@@ -204,7 +204,33 @@ struct ContentView: View {
                 }
 
                 if let result = pairing.comparisonResult {
-                    comparisonCard(result)
+                    NavigationLink {
+                        ResultView(
+                            result: result,
+                            firstMetDate: pairing.savedFirstMetDate ?? pairing.firstMetDate
+                        )
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "sparkles")
+                                .font(.title2)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("운명 점수 \(result.score)점")
+                                    .font(.headline)
+                                Text("우리의 교차 기록 보기")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(14)
+                        .background(.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -212,43 +238,6 @@ struct ContentView: View {
         }
         .task(id: userID) {
             await pairing.loadLatestPair(userID: userID)
-        }
-    }
-
-    private func comparisonCard(_ result: DestinyScoreResult) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("흐린 기록 비교 결과")
-                .font(.headline)
-
-            Text("운명 점수 \(result.score)점")
-                .font(.title3.bold())
-                .foregroundStyle(.tint)
-
-            Text("겹친 날짜 \(result.totalIntersectionDayCount)일")
-                .font(.subheadline)
-
-            if let closest = result.closestIntersection {
-                Text("가장 가까운 기록: \(strengthLabel(closest.strength))")
-                    .font(.subheadline)
-            }
-
-            Text("약 1km 지역과 3시간 구간으로 흐린 기록을 비교한 재미 요소예요.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private func strengthLabel(_ strength: IntersectionStrength) -> String {
-        switch strength {
-        case .strong:
-            "같은 시간대·같은 지역"
-        case .close:
-            "가까운 시간대·인접 지역"
-        case .loose:
-            "같은 날·가까운 지역"
         }
     }
 
