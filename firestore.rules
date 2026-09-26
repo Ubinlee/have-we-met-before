@@ -39,8 +39,10 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'creatorId',
+          'creatorNickname',
           'memberIds',
           'status',
+          'expiresAt',
           'firstMetAt',
           'firstMetStatus',
           'firstMetProposedBy',
@@ -49,6 +51,11 @@ service cloud.firestore {
           'updatedAt'
         ])
         && data.creatorId is string
+        && (!('creatorNickname' in data)
+          || (data.creatorNickname is string
+            && data.creatorNickname.size() > 0
+            && data.creatorNickname.size() <= 12))
+        && (!('expiresAt' in data) || data.expiresAt is timestamp)
         && data.memberIds is list
         && data.memberIds.size() >= 1
         && data.memberIds.size() <= 2
@@ -85,6 +92,8 @@ service cloud.firestore {
         && request.resource.data.creatorId == resource.data.creatorId
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['memberIds', 'status', 'updatedAt'])
         && validPair(request.resource.data);
     }
 

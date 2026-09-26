@@ -33,9 +33,15 @@ final class PairingStore: ObservableObject {
     @Published private(set) var comparisonResult: DestinyScoreResult?
     @Published private(set) var friendSummaries: [FriendConnectionSummary] = []
     @Published private(set) var state: OperationState = .idle
+    @Published private(set) var creatorID: String?
+    @Published private(set) var connectedFriendNickname = "친구"
+    @Published private(set) var inviteCreatorNickname = "친구"
 
     private let database = Firestore.firestore()
     private var pairListener: ListenerRegistration?
+    private var membersListener: ListenerRegistration?
+    private var currentUserID: String?
+    private var analysisInFlight = false
 
     var isWorking: Bool { state == .working }
 
@@ -46,6 +52,8 @@ final class PairingStore: ObservableObject {
     var hasSavedFirstMetDate: Bool { savedFirstMetDate != nil }
     var isFirstMetDateConfirmed: Bool { firstMetStatus == "confirmed" }
 
+    func isCreator(userID: String) -> Bool { creatorID == userID }
+
     func needsFirstMetDateConfirmation(userID: String) -> Bool {
         firstMetStatus == "pending"
             && firstMetProposedBy != nil
@@ -53,6 +61,7 @@ final class PairingStore: ObservableObject {
     }
 
     func loadLatestPair(userID: String) async {
+        currentUserID = userID
         do {
             let profile = try await database
                 .collection("users")
@@ -85,6 +94,7 @@ final class PairingStore: ObservableObject {
     }
 
     func openPair(pairID: String, userID: String) async {
+        currentUserID = userID
         comparisonResult = nil
         state = .working
         do {
@@ -102,13 +112,14 @@ final class PairingStore: ObservableObject {
     }
 
     func saveProfile(userID: String) async -> Bool {
+        currentUserID = userID
         let trimmedNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedNickname.isEmpty else {
             state = .failed(message: "닉네임을 입력해 주세요.")
             return false
         }
-        guard trimmedNickname.count <= 20 else {
-            state = .failed(message: "닉네임은 20자 이하로 입력해 주세요.")
+        guard trimmedNickname.count <= 12 else {
+            state = .failed(message: "닉네임은 12자 이하로 입력해 주세요.")
             return false
         }
 
@@ -139,14 +150,16 @@ final class PairingStore: ObservableObject {
         guard await saveProfile(userID: userID) else { return }
 
         state = .working
-        let pairID = UUID().uuidString.lowercased()
+        let pairID = makeInviteCode()
         let pairReference = database.collection("pairs").document(pairID)
 
         do {
             try await pairReference.setData([
                 "creatorId": userID,
+                "creatorNickname": nickname,
                 "memberIds": [userID],
                 "status": "waiting",
+                "expiresAt": Timestamp(date: Date().addingTimeInterval(24 * 60 * 60)),
                 "createdAt": FieldValue.serverTimestamp(),
                 "updatedAt": FieldValue.serverTimestamp()
             ])
@@ -161,6 +174,7 @@ final class PairingStore: ObservableObject {
 
             inviteID = pairID
             activePairID = nil
+            creatorID = userID
             pairStatus = "친구의 수락을 기다리고 있어요."
             state = .succeeded(message: "초대 ID를 만들었어요.")
             listenToPair(documentID: pairID)
@@ -169,13 +183,46 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    func acceptPair(userID: String) async {
+    func previewInvite(userID: String) async -> Bool {
+        let pairID = normalizedInviteID(joinInviteID)
+        guard !pairID.isEmpty else {
+            state = .failed(message: "초대 코드를 입력해 주세요.")
+            return false
+        }
+        state = .working
+        do {
+            let snapshot = try await database.collection("pairs").document(pairID).getDocument()
+            guard let data = snapshot.data() else {
+                state = .failed(message: "사용할 수 없는 초대 코드예요.")
+                return false
+            }
+            if let expiresAt = data["expiresAt"] as? Timestamp, expiresAt.dateValue() < Date() {
+                state = .failed(message: "만료된 초대 코드예요. 새 코드를 받아 주세요.")
+                return false
+            }
+            guard data["status"] as? String == "waiting",
+                  let creator = data["creatorId"] as? String,
+                  creator != userID else {
+                state = .failed(message: creatorErrorMessage(data: data, userID: userID))
+                return false
+            }
+            inviteCreatorNickname = data["creatorNickname"] as? String ?? "친구"
+            joinInviteID = pairID
+            state = .succeeded(message: "초대 코드를 확인했어요.")
+            return true
+        } catch {
+            state = .failed(message: inviteAcceptanceMessage(for: error))
+            return false
+        }
+    }
+
+    func acceptPair(userID: String) async -> Bool {
         let pairID = normalizedInviteID(joinInviteID)
         guard !pairID.isEmpty else {
             state = .failed(message: "초대 ID를 입력해 주세요.")
-            return
+            return false
         }
-        guard await saveProfile(userID: userID) else { return }
+        guard await saveProfile(userID: userID) else { return false }
         state = .working
 
         let pairReference = database.collection("pairs").document(pairID)
@@ -189,7 +236,13 @@ final class PairingStore: ObservableObject {
                   memberIDs.count == 1,
                   !memberIDs.contains(userID) else {
                 state = .failed(message: "유효한 대기 중 초대가 아니에요.")
-                return
+                return false
+            }
+
+            if let expiresAt = data["expiresAt"] as? Timestamp,
+               expiresAt.dateValue() < Date() {
+                state = .failed(message: "초대 코드가 만료됐어요.")
+                return false
             }
 
             try await pairReference.updateData([
@@ -209,11 +262,15 @@ final class PairingStore: ObservableObject {
             inviteID = pairID
             joinInviteID = pairID
             activePairID = pairID
+            creatorID = data["creatorId"] as? String
+            connectedFriendNickname = inviteCreatorNickname
             pairStatus = "친구와 연결됐어요."
             state = .succeeded(message: "친구와 연결됐어요.")
             listenToPair(documentID: pairID)
+            return true
         } catch {
             state = .failed(message: inviteAcceptanceMessage(for: error))
+            return false
         }
     }
 
@@ -601,13 +658,22 @@ final class PairingStore: ObservableObject {
     private func applyPair(documentID: String, data: [String: Any]) {
         inviteID = documentID
         joinInviteID = documentID
+        creatorID = data["creatorId"] as? String
+        if let friend = friendSummaries.first(where: { $0.id == documentID }) {
+            connectedFriendNickname = friend.nickname
+        }
 
         if data["status"] as? String == "active" {
             activePairID = documentID
             pairStatus = "친구와 연결됐어요."
+            if let userID = currentUserID {
+                listenToMemberReadiness(pairID: documentID, userID: userID)
+            }
         } else {
             activePairID = nil
             pairStatus = "친구의 수락을 기다리고 있어요."
+            membersListener?.remove()
+            membersListener = nil
         }
 
         if let timestamp = data["firstMetAt"] as? Timestamp {
@@ -634,8 +700,43 @@ final class PairingStore: ObservableObject {
             }
     }
 
+    private func listenToMemberReadiness(pairID: String, userID: String) {
+        membersListener?.remove()
+        membersListener = database.collection("pairs").document(pairID)
+            .collection("members")
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard error == nil,
+                      let documents = snapshot?.documents,
+                      documents.count == 2,
+                      documents.allSatisfy({ $0.data()["analysisStatus"] as? String == "ready" }) else {
+                    return
+                }
+
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.isFirstMetDateConfirmed,
+                          self.comparisonResult == nil,
+                          !self.analysisInFlight else { return }
+                    self.analysisInFlight = true
+                    await self.compareWithFriend(userID: userID)
+                    self.analysisInFlight = false
+                }
+            }
+    }
+
     private func normalizedInviteID(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.contains("-") ? trimmed.lowercased() : trimmed.uppercased()
+    }
+
+    private func makeInviteCode() -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<6).compactMap { _ in alphabet.randomElement() })
+    }
+
+    private func creatorErrorMessage(data: [String: Any], userID: String) -> String {
+        if data["creatorId"] as? String == userID { return "내가 만든 초대 코드는 입력할 수 없어요." }
+        return "이미 사용했거나 사용할 수 없는 초대 코드예요."
     }
 
     private func timestamp(from value: Any?) -> TimeInterval {

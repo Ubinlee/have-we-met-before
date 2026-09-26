@@ -64,9 +64,7 @@ enum SharedTrajectoryMatcher {
         bucketDifference: Int,
         distanceMeters: Double
     ) -> IntersectionStrength? {
-        if bucketDifference == 0,
-           first.latitudeCell == second.latitudeCell,
-           first.longitudeCell == second.longitudeCell {
+        if bucketDifference == 0, distanceMeters <= 1_000 {
             return .strong
         }
 

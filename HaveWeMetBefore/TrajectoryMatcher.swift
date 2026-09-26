@@ -44,8 +44,8 @@ struct IntersectionThresholds: Sendable {
     let looseDistanceMeters: Double
 
     static let mvp = IntersectionThresholds(
-        strongDistanceMeters: 300,
-        strongTimeInterval: 60 * 60,
+        strongDistanceMeters: 1_000,
+        strongTimeInterval: 3 * 60 * 60,
         closeDistanceMeters: 1_000,
         closeTimeInterval: 3 * 60 * 60,
         looseDistanceMeters: 5_000
@@ -121,8 +121,12 @@ enum TrajectoryMatcher {
         thresholds: IntersectionThresholds,
         calendar: Calendar
     ) -> IntersectionStrength? {
+        let bucketDuration = thresholds.strongTimeInterval
+        let firstBucket = Int(floor(firstDate.timeIntervalSince1970 / bucketDuration))
+        let secondBucket = Int(floor(secondDate.timeIntervalSince1970 / bucketDuration))
+
         if distanceMeters <= thresholds.strongDistanceMeters,
-           timeDifference <= thresholds.strongTimeInterval {
+           firstBucket == secondBucket {
             return .strong
         }
 
