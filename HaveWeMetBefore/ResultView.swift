@@ -4,6 +4,7 @@ import SwiftUI
 struct ResultView: View {
     let result: DestinyScoreResult
     let firstMetDate: Date
+    @State private var placeNames: [String: String] = [:]
 
     private var matches: [TrajectoryIntersection] { result.rankedIntersections }
 
@@ -38,6 +39,9 @@ struct ResultView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("거의 만날 뻔한 사이")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: matches.map(\.id)) {
+            await resolvePlaceNames()
+        }
     }
 
     private var hero: some View {
@@ -80,15 +84,12 @@ struct ResultView: View {
             approximateMap(match)
             Text(Self.dateFormatter.string(from: match.occurredAt))
                 .font(.title2.bold())
-            Text(ApproximatePlaceResolver.name(
-                latitude: match.approximateLatitude,
-                longitude: match.approximateLongitude
-            ))
+            Text(placeNames[match.id] ?? "위치 이름을 확인하는 중…")
             .font(.headline)
             .foregroundStyle(.secondary)
             HStack(spacing: 12) {
-                metric("시간 차이", timeText(match.timeDifference))
-                metric("두 사람 거리", distanceText(match.distanceMeters))
+                metric("추정 시간 차이", timeText(match.timeDifference))
+                metric("추정 거리", distanceText(match.distanceMeters))
             }
         }
     }
@@ -100,8 +101,8 @@ struct ResultView: View {
         )
         let region = MKCoordinateRegion(
             center: coordinate,
-            latitudinalMeters: 3_200,
-            longitudinalMeters: 3_200
+            latitudinalMeters: 1_800,
+            longitudinalMeters: 1_800
         )
         return Map(initialPosition: .region(region), interactionModes: []) {
             MapCircle(center: coordinate, radius: 700)
@@ -114,7 +115,7 @@ struct ResultView: View {
         .frame(height: 260)
         .clipShape(RoundedRectangle(cornerRadius: 24))
         .overlay(alignment: .bottomLeading) {
-            Label("정확한 좌표가 아닌 약 1km 범위예요", systemImage: "eye.slash")
+            Label("약 1km로 흐린 위치 범위예요", systemImage: "eye.slash")
                 .font(.caption.weight(.medium))
                 .padding(10)
                 .background(.regularMaterial, in: Capsule())
@@ -135,12 +136,9 @@ struct ResultView: View {
                             .frame(width: 28)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(Self.dateFormatter.string(from: match.occurredAt)).font(.headline)
-                            Text(ApproximatePlaceResolver.name(
-                                latitude: match.approximateLatitude,
-                                longitude: match.approximateLongitude
-                            ))
+                            Text(placeNames[match.id] ?? "위치 이름을 확인하는 중…")
                             .font(.subheadline.weight(.semibold))
-                            Text("시간 차이 \(timeText(match.timeDifference)) · 거리 \(distanceText(match.distanceMeters))")
+                            Text("추정 시간 차이 \(timeText(match.timeDifference)) · 추정 거리 \(distanceText(match.distanceMeters))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -172,6 +170,17 @@ struct ResultView: View {
         .foregroundStyle(.secondary)
     }
 
+    private func resolvePlaceNames() async {
+        for match in matches where placeNames[match.id] == nil {
+            let name = await ApproximatePlaceResolver.name(
+                latitude: match.approximateLatitude,
+                longitude: match.approximateLongitude
+            )
+            guard !Task.isCancelled else { return }
+            placeNames[match.id] = name
+        }
+    }
+
     private var shareText: String {
         matches.isEmpty
             ? "처음 만나기 전 우리의 기록을 비교해 봤어요. #본적있나"
@@ -181,7 +190,7 @@ struct ResultView: View {
     private func timeText(_ seconds: TimeInterval) -> String {
         let hours = Int(seconds) / 3_600
         let minutes = (Int(seconds) % 3_600) / 60
-        if hours == 0 { return minutes == 0 ? "같은 시간대" : "약 \(minutes)분" }
+        if hours == 0 { return minutes == 0 ? "같은 3시간 구간" : "약 \(minutes)분" }
         if minutes == 0 { return "약 \(hours)시간" }
         return "약 \(hours)시간 \(minutes)분"
     }
