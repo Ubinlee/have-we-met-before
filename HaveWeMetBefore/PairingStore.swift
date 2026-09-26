@@ -167,11 +167,11 @@ final class PairingStore: ObservableObject {
             pairStatus = "친구와 연결됐어요."
             state = .succeeded(message: "친구와 연결됐어요.")
         } catch {
-            state = .failed(message: userFacingMessage(for: error))
+            state = .failed(message: inviteAcceptanceMessage(for: error))
         }
     }
 
-    func saveFirstMetDate() async {
+    func saveFirstMetDate(userID: String, events: [VisitEvent]) async {
         guard let pairID = activePairID else {
             state = .failed(message: "먼저 친구와 연결해 주세요.")
             return
@@ -203,7 +203,8 @@ final class PairingStore: ObservableObject {
             savedFirstMetDate = normalizedDate
             uploadedRecordCount = 0
             comparisonResult = nil
-            state = .succeeded(message: "기준일을 저장했어요. 두 사람 모두 기록을 다시 올려 주세요.")
+            state = .succeeded(message: "기준일을 저장했어요. 내 기록을 자동으로 갱신할게요.")
+            await syncVisitsAndCompare(userID: userID, events: events)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -338,11 +339,9 @@ final class PairingStore: ObservableObject {
                 second: friendRecords
             )
 
-            var utcCalendar = Calendar(identifier: .gregorian)
-            utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
             let result = DestinyScorer.calculate(
                 intersections: intersections,
-                calendar: utcCalendar
+                calendar: .autoupdatingCurrent
             )
 
             try await saveComparisonResult(
@@ -514,6 +513,15 @@ final class PairingStore: ObservableObject {
             return "Firebase 접근 권한을 확인해 주세요."
         }
         return error.localizedDescription
+    }
+
+    private func inviteAcceptanceMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        if nsError.domain == FirestoreErrorDomain,
+           nsError.code == FirestoreErrorCode.permissionDenied.rawValue {
+            return "이 초대는 이미 사용됐거나 현재 계정에서 열 수 없어요. 새 초대 ID를 받아 주세요."
+        }
+        return userFacingMessage(for: error)
     }
 }
 

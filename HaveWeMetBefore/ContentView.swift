@@ -155,10 +155,15 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
 
                         Button(pairing.hasSavedFirstMetDate ? "기준일 변경 저장" : "기준일 저장") {
-                            Task { await pairing.saveFirstMetDate() }
+                            Task {
+                                await pairing.saveFirstMetDate(
+                                    userID: userID,
+                                    events: analyzer.summary.visitEvents
+                                )
+                            }
                         }
                         .buttonStyle(.bordered)
-                        .disabled(pairing.isWorking)
+                        .disabled(pairing.isWorking || analyzer.scanState != .finished)
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -171,7 +176,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    Button("기록 올리고 비교") {
+                    Button(pairing.uploadedRecordCount > 0 ? "기록 갱신하고 비교" : "기록 올리고 비교") {
                         Task {
                             await pairing.syncVisitsAndCompare(
                                 userID: userID,

@@ -100,7 +100,7 @@ struct ResultView: View {
                 .font(.headline)
 
             if let closest = result.closestIntersection {
-                Text(Self.utcDateFormatter.string(from: closest.occurredAt))
+                Text(Self.localDateFormatter.string(from: closest.occurredAt))
                     .font(.title3.bold())
 
                 Text(momentMessage(for: closest.strength))
@@ -202,14 +202,6 @@ struct ResultView: View {
         return formatter
     }()
 
-    private static let utcDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateStyle = .long
-        formatter.timeStyle = .none
-        return formatter
-    }()
 }
 
 private struct ScoreRow: View {

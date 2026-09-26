@@ -64,20 +64,19 @@ enum SharedTrajectoryMatcher {
             return .strong
         }
 
-        if bucketDifference <= 1, distanceMeters <= 2_000 {
+        if bucketDifference <= 1, distanceMeters <= 1_000 {
             return .close
         }
 
-        if utcDayIndex(first.timeBucketIndex) == utcDayIndex(second.timeBucketIndex),
+        if Calendar.autoupdatingCurrent.isDate(
+            first.approximateDate,
+            inSameDayAs: second.approximateDate
+        ),
            distanceMeters <= 5_000 {
             return .loose
         }
 
         return nil
-    }
-
-    private static func utcDayIndex(_ timeBucketIndex: Int) -> Int {
-        timeBucketIndex / 8
     }
 
     private static func isBetterIntersection(
