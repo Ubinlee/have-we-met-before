@@ -81,10 +81,20 @@ final class PairingStore: ObservableObject {
                 pairs: snapshot.documents
             )
 
-            guard let pair = snapshot.documents.max(by: {
+            let availablePairs = snapshot.documents.filter {
+                ($0.data()["status"] as? String) != "ended"
+            }
+
+            guard let pair = availablePairs.max(by: {
                 timestamp(from: $0.data()["updatedAt"])
                     < timestamp(from: $1.data()["updatedAt"])
-            }) else { return }
+            }) else {
+                activePairID = nil
+                inviteID = ""
+                joinInviteID = ""
+                pairStatus = nil
+                return
+            }
 
             applyPair(documentID: pair.documentID, data: pair.data())
             listenToPair(documentID: pair.documentID)
@@ -106,6 +116,27 @@ final class PairingStore: ObservableObject {
             applyPair(documentID: snapshot.documentID, data: data)
             listenToPair(documentID: snapshot.documentID)
             await compareWithFriend(userID: userID)
+        } catch {
+            state = .failed(message: userFacingMessage(for: error))
+        }
+    }
+
+    func disconnectPair(pairID: String, userID: String) async {
+        state = .working
+        do {
+            try await database.collection("pairs").document(pairID).updateData([
+                "status": "ended",
+                "updatedAt": FieldValue.serverTimestamp()
+            ])
+            friendSummaries.removeAll { $0.id == pairID }
+            if activePairID == pairID {
+                activePairID = nil
+                inviteID = ""
+                joinInviteID = ""
+                comparisonResult = nil
+                pairStatus = nil
+            }
+            state = .succeeded(message: "연결을 해제했어요.")
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -185,8 +216,8 @@ final class PairingStore: ObservableObject {
 
     func previewInvite(userID: String) async -> Bool {
         let pairID = normalizedInviteID(joinInviteID)
-        guard !pairID.isEmpty else {
-            state = .failed(message: "초대 코드를 입력해 주세요.")
+        guard pairID.count == 6 else {
+            state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
         state = .working
@@ -218,8 +249,8 @@ final class PairingStore: ObservableObject {
 
     func acceptPair(userID: String) async -> Bool {
         let pairID = normalizedInviteID(joinInviteID)
-        guard !pairID.isEmpty else {
-            state = .failed(message: "초대 ID를 입력해 주세요.")
+        guard pairID.count == 6 else {
+            state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
         guard await saveProfile(userID: userID) else { return false }
@@ -259,8 +290,8 @@ final class PairingStore: ObservableObject {
                 recordCount: 0
             )
 
-            inviteID = pairID
-            joinInviteID = pairID
+            inviteID = ""
+            joinInviteID = ""
             activePairID = pairID
             creatorID = data["creatorId"] as? String
             connectedFriendNickname = inviteCreatorNickname
@@ -414,11 +445,6 @@ final class PairingStore: ObservableObject {
                 state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
                 return
             }
-            guard let pairUpdatedTimestamp = data["updatedAt"] as? Timestamp else {
-                state = .failed(message: "연결 정보를 다시 불러와 주세요.")
-                return
-            }
-
             activePairID = pairID
             pairStatus = "친구와 연결됐어요."
             let cutoffDate = firstMetTimestamp.dateValue()
@@ -440,16 +466,14 @@ final class PairingStore: ObservableObject {
             let (ownMemberSnapshot, friendMemberSnapshot) = try await (ownMember, friendMember)
 
             guard memberIsReady(
-                ownMemberSnapshot.data(),
-                updatedAfter: pairUpdatedTimestamp.dateValue()
+                ownMemberSnapshot.data()
             ) else {
                 state = .succeeded(message: "내 기록을 자동으로 준비하고 있어요. 잠시 후 다시 시도해 주세요.")
                 return
             }
 
             guard memberIsReady(
-                friendMemberSnapshot.data(),
-                updatedAfter: pairUpdatedTimestamp.dateValue()
+                friendMemberSnapshot.data()
             ) else {
                 state = .succeeded(message: "친구의 기록 준비가 아직 끝나지 않았어요.")
                 return
@@ -623,12 +647,8 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    private func memberIsReady(_ data: [String: Any]?, updatedAfter cutoff: Date) -> Bool {
-        guard data?["analysisStatus"] as? String == "ready",
-              let timestamp = data?["updatedAt"] as? Timestamp else {
-            return false
-        }
-        return timestamp.dateValue() >= cutoff
+    private func memberIsReady(_ data: [String: Any]?) -> Bool {
+        data?["analysisStatus"] as? String == "ready"
     }
 
     private func visitsCollection(pairID: String, userID: String) -> CollectionReference {
@@ -656,22 +676,32 @@ final class PairingStore: ObservableObject {
     }
 
     private func applyPair(documentID: String, data: [String: Any]) {
-        inviteID = documentID
-        joinInviteID = documentID
         creatorID = data["creatorId"] as? String
         if let friend = friendSummaries.first(where: { $0.id == documentID }) {
             connectedFriendNickname = friend.nickname
         }
 
-        if data["status"] as? String == "active" {
+        switch data["status"] as? String {
+        case "active":
             activePairID = documentID
+            inviteID = ""
+            joinInviteID = ""
             pairStatus = "친구와 연결됐어요."
             if let userID = currentUserID {
                 listenToMemberReadiness(pairID: documentID, userID: userID)
+                Task { await refreshConnectedFriendNickname(pairID: documentID, userID: userID) }
             }
-        } else {
+        case "waiting":
             activePairID = nil
+            inviteID = documentID
             pairStatus = "친구의 수락을 기다리고 있어요."
+            membersListener?.remove()
+            membersListener = nil
+        default:
+            activePairID = nil
+            inviteID = ""
+            joinInviteID = ""
+            pairStatus = nil
             membersListener?.remove()
             membersListener = nil
         }
@@ -686,6 +716,19 @@ final class PairingStore: ObservableObject {
             savedFirstMetDate = nil
             firstMetStatus = nil
             firstMetProposedBy = nil
+        }
+    }
+
+    private func refreshConnectedFriendNickname(pairID: String, userID: String) async {
+        do {
+            let pair = try await database.collection("pairs").document(pairID).getDocument()
+            guard let memberIDs = pair.data()?["memberIds"] as? [String],
+                  let friendID = memberIDs.first(where: { $0 != userID }) else { return }
+            let member = try await database.collection("pairs").document(pairID)
+                .collection("members").document(friendID).getDocument()
+            connectedFriendNickname = member.data()?["nickname"] as? String ?? "친구"
+        } catch {
+            // The connection remains usable even if the display name cannot be refreshed yet.
         }
     }
 

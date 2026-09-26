@@ -474,6 +474,27 @@ private struct HomeView: View {
             .foregroundStyle(AppTheme.primary)
             .padding(.top, -20)
 
+            if pairing.activePairID != nil, pairing.comparisonResult == nil {
+                Button(action: onPairStatus) {
+                    HStack {
+                        Image(systemName: pairing.isFirstMetDateConfirmed ? "sparkles" : "calendar.badge.clock")
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(pairing.connectedFriendNickname)님과 연결됐어요")
+                                .font(.system(size: 13, weight: .bold))
+                            Text(pairStatusDetail)
+                                .font(.system(size: 11))
+                                .foregroundStyle(AppTheme.secondaryText)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .padding(16)
+                    .background(AppTheme.primarySoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                }
+                .buttonStyle(.plain)
+            }
+
             if pairing.friendSummaries.isEmpty {
                 InfoCard {
                     VStack(spacing: 12) {
@@ -491,7 +512,12 @@ private struct HomeView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(pairing.friendSummaries.enumerated()), id: \.element.id) { index, friend in
                         NavigationLink {
-                            FriendResultLoaderView(pairing: pairing, friend: friend, userID: userID)
+                            FriendResultLoaderView(
+                                pairing: pairing,
+                                analyzer: analyzer,
+                                friend: friend,
+                                userID: userID
+                            )
                         } label: {
                             FriendRankingRow(rank: index + 1, friend: friend)
                         }
@@ -503,29 +529,6 @@ private struct HomeView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay { RoundedRectangle(cornerRadius: 9).stroke(AppTheme.divider) }
             }
-
-            if pairing.currentPairID != nil, pairing.comparisonResult == nil {
-                Button(action: onPairStatus) {
-                    HStack {
-                        Image(systemName: pairing.isFirstMetDateConfirmed ? "sparkles" : "calendar.badge.clock")
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(pairing.pairStatus ?? "연결 상태 확인")
-                                .font(.system(size: 13, weight: .bold))
-                            Text(pairStatusDetail)
-                                .font(.system(size: 11))
-                                .foregroundStyle(AppTheme.secondaryText)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                    }
-                    .padding(16)
-                    .background(AppTheme.primarySoft)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-            }
-
-            Spacer()
 
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -640,6 +643,10 @@ private struct InviteJoinFlowView: View {
                 .background(.white)
                 .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.primary).frame(height: 2) }
                 .padding(.top, 32)
+                .onChange(of: pairing.joinInviteID) { _, value in
+                    let normalized = String(value.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(6))
+                    if normalized != value { pairing.joinInviteID = normalized }
+                }
             operationMessage
             Spacer()
             Button("확인") {
@@ -648,7 +655,7 @@ private struct InviteJoinFlowView: View {
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
-            .disabled(pairing.joinInviteID.trimmingCharacters(in: .whitespaces).isEmpty || pairing.isWorking)
+            .disabled(pairing.joinInviteID.count != 6 || pairing.isWorking)
         }
     }
 
@@ -845,6 +852,7 @@ private struct FriendRankingRow: View {
 
 private struct FriendResultLoaderView: View {
     @ObservedObject var pairing: PairingStore
+    @ObservedObject var analyzer: PhotoLibraryAnalyzer
     let friend: FriendConnectionSummary
     let userID: String
 
@@ -865,7 +873,12 @@ private struct FriendResultLoaderView: View {
                 ProgressView("\(friend.nickname)님과의 결과를 불러오고 있어요")
             }
         }
-        .task(id: friend.id) { await pairing.openPair(pairID: friend.id, userID: userID) }
+        .task(id: friend.id) {
+            await pairing.openPair(pairID: friend.id, userID: userID)
+            guard pairing.isFirstMetDateConfirmed else { return }
+            await pairing.prepareVisits(userID: userID, events: analyzer.summary.visitEvents)
+            await pairing.startAnalysis(userID: userID)
+        }
     }
 }
 
@@ -886,7 +899,10 @@ private struct FriendManagementView: View {
                                     .font(.caption).foregroundStyle(AppTheme.secondaryText)
                             }
                             Spacer()
-                            Image(systemName: "chevron.right")
+                            Button("연결 해제", role: .destructive) {
+                                Task { await pairing.disconnectPair(pairID: friend.id, userID: userID) }
+                            }
+                            .font(.caption.weight(.semibold))
                         }
                         .padding(.vertical, 16)
                         Divider()
