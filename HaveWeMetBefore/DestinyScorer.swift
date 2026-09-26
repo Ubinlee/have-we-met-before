@@ -5,6 +5,7 @@ struct DestinyScoreResult: Sendable {
     let closestIntersection: TrajectoryIntersection?
     let totalIntersectionDayCount: Int
     let additionalIntersectionDayCount: Int
+    let rankedIntersections: [TrajectoryIntersection]
 }
 
 enum DestinyScorer {
@@ -17,7 +18,8 @@ enum DestinyScorer {
                 score: 0,
                 closestIntersection: nil,
                 totalIntersectionDayCount: 0,
-                additionalIntersectionDayCount: 0
+                additionalIntersectionDayCount: 0,
+                rankedIntersections: []
             )
         }
 
@@ -30,13 +32,30 @@ enum DestinyScorer {
             100,
             baseScore(for: closestIntersection.strength) + repeatedIntersectionScore
         )
+        let rankedIntersections = bestIntersectionPerDay(
+            intersections,
+            calendar: calendar
+        )
 
         return DestinyScoreResult(
             score: score,
             closestIntersection: closestIntersection,
             totalIntersectionDayCount: intersectionDays.count,
-            additionalIntersectionDayCount: additionalDayCount
+            additionalIntersectionDayCount: additionalDayCount,
+            rankedIntersections: Array(rankedIntersections.prefix(3))
         )
+    }
+
+    private static func bestIntersectionPerDay(
+        _ intersections: [TrajectoryIntersection],
+        calendar: Calendar
+    ) -> [TrajectoryIntersection] {
+        Dictionary(grouping: intersections) {
+            calendar.startOfDay(for: $0.occurredAt)
+        }
+        .values
+        .compactMap { $0.sorted(by: isBetterIntersection).first }
+        .sorted(by: isBetterIntersection)
     }
 
     private static func baseScore(for strength: IntersectionStrength) -> Int {

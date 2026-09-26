@@ -1,45 +1,34 @@
+import MapKit
 import SwiftUI
 
 struct ResultView: View {
     let result: DestinyScoreResult
     let firstMetDate: Date
 
-    private var hasIntersection: Bool {
-        result.closestIntersection != nil
-    }
-
-    private var baseScore: Int {
-        guard let strength = result.closestIntersection?.strength else { return 0 }
-        switch strength {
-        case .strong: return 70
-        case .close: return 50
-        case .loose: return 30
-        }
-    }
-
-    private var repeatedScore: Int {
-        max(0, result.score - baseScore)
-    }
-
-    private var shareText: String {
-        if hasIntersection {
-            "처음 만나기 전, 우리는 이미 (result.totalIntersectionDayCount)일이나 스칠 뻔했대요. 운명 점수 (result.score)점! #본적있나"
-        } else {
-            "처음 만나기 전 우리의 사진 기록을 비교해 봤어요. 이번에는 스친 흔적을 찾지 못했어요. #본적있나"
-        }
-    }
+    private var matches: [TrajectoryIntersection] { result.rankedIntersections }
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 28) {
                 hero
-                closestMomentCard
-                scoreBreakdownCard
+                if let first = matches.first {
+                    firstPlace(first)
+                    otherPlaces
+                } else {
+                    ContentUnavailableView(
+                        "교차 기록 없음",
+                        systemImage: "map",
+                        description: Text("같은 날 가까운 지역에 있었던 흔적을 찾지 못했어요.")
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 32)
+                }
                 privacyNote
-
                 ShareLink(item: shareText) {
                     Label("결과 공유하기", systemImage: "square.and.arrow.up")
+                        .font(.headline)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -47,191 +36,166 @@ struct ResultView: View {
             .padding(20)
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle("우리의 교차 기록")
+        .navigationTitle("거의 만날 뻔한 사이")
         .navigationBarTitleDisplayMode(.inline)
     }
 
     private var hero: some View {
-        VStack(spacing: 16) {
-            Text(hasIntersection ? "우리는 이미 스치고 있었어요" : "아직 스친 흔적은 없어요")
-                .font(.title2.bold())
-                .multilineTextAlignment(.center)
-
-            ZStack {
-                Circle()
-                    .stroke(.tint.opacity(0.12), lineWidth: 14)
-
-                Circle()
-                    .trim(from: 0, to: Double(result.score) / 100)
-                    .stroke(
-                        .tint,
-                        style: StrokeStyle(lineWidth: 14, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-
-                VStack(spacing: 2) {
-                    Text("운명 점수")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(result.score)")
-                        .font(.system(size: 48, weight: .bold, design: .rounded))
-                    Text("점")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 180, height: 180)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("운명 점수 \(result.score)점")
-
-            Text("처음 알게 된 날인 \(Self.localDateFormatter.string(from: firstMetDate))보다 이전 사진만 비교했어요.")
-                .font(.footnote)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("분석 정보")
+                .font(.headline)
+            Text("처음 알게 된 날 · \(Self.dateFormatter.string(from: firstMetDate))")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            Text(headline)
+                .font(.title2.bold())
+                .padding(.top, 10)
+            HStack(alignment: .firstTextBaseline) {
+                Text("운명 점수").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(result.score)")
+                    .font(.system(size: 42, weight: .bold, design: .rounded))
+                    .foregroundStyle(.tint)
+                Text("점").font(.headline)
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24))
+    }
+
+    private var headline: String {
+        guard let match = matches.first else { return "가까운 흔적을 찾지 못했어요." }
+        return switch match.strength {
+        case .strong: "두 사람은 만나기 전, 같은 시간대 같은 지역에 있었어요."
+        case .close: "두 사람은 만나기 전, 아주 가까운 곳을 지나갔어요."
+        case .loose: "두 사람은 만나기 전, 같은 날 가까운 동네에 있었어요."
+        }
+    }
+
+    private func firstPlace(_ match: TrajectoryIntersection) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("가장 가까웠던 순간", systemImage: "sparkles")
+                .font(.title3.bold())
+            approximateMap(match)
+            Text(Self.dateFormatter.string(from: match.occurredAt))
+                .font(.title2.bold())
+            Text(ApproximatePlaceResolver.name(
+                latitude: match.approximateLatitude,
+                longitude: match.approximateLongitude
+            ))
+            .font(.headline)
+            .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                metric("시간 차이", timeText(match.timeDifference))
+                metric("두 사람 거리", distanceText(match.distanceMeters))
+            }
+        }
+    }
+
+    private func approximateMap(_ match: TrajectoryIntersection) -> some View {
+        let coordinate = CLLocationCoordinate2D(
+            latitude: match.approximateLatitude,
+            longitude: match.approximateLongitude
+        )
+        let region = MKCoordinateRegion(
+            center: coordinate,
+            latitudinalMeters: 3_200,
+            longitudinalMeters: 3_200
+        )
+        return Map(initialPosition: .region(region), interactionModes: []) {
+            MapCircle(center: coordinate, radius: 700)
+                .foregroundStyle(.tint.opacity(0.2))
+                .stroke(.tint.opacity(0.8), lineWidth: 2)
+            Marker("대략적인 위치", coordinate: coordinate)
+                .tint(Color.accentColor)
+        }
+        .mapStyle(.standard(pointsOfInterest: .excludingAll))
+        .frame(height: 260)
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        .overlay(alignment: .bottomLeading) {
+            Label("정확한 좌표가 아닌 약 1km 범위예요", systemImage: "eye.slash")
+                .font(.caption.weight(.medium))
+                .padding(10)
+                .background(.regularMaterial, in: Capsule())
+                .padding(12)
+        }
     }
 
     @ViewBuilder
-    private var closestMomentCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("가장 가까웠던 순간", systemImage: "sparkles")
-                .font(.headline)
-
-            if let closest = result.closestIntersection {
-                Text(Self.localDateFormatter.string(from: closest.occurredAt))
-                    .font(.title3.bold())
-
-                Text(momentMessage(for: closest.strength))
-                    .font(.body)
-
-                HStack(spacing: 8) {
-                    Image(systemName: strengthSymbol(for: closest.strength))
-                    Text(strengthLabel(for: closest.strength))
-                        .fontWeight(.semibold)
+    private var otherPlaces: some View {
+        if matches.count > 1 {
+            VStack(spacing: 0) {
+                ForEach(Array(matches.dropFirst().enumerated()), id: \.element.id) { index, match in
+                    if index > 0 { Divider() }
+                    HStack(alignment: .top, spacing: 14) {
+                        Text("\(index + 2)")
+                            .font(.title2.bold())
+                            .foregroundStyle(.tint)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(Self.dateFormatter.string(from: match.occurredAt)).font(.headline)
+                            Text(ApproximatePlaceResolver.name(
+                                latitude: match.approximateLatitude,
+                                longitude: match.approximateLongitude
+                            ))
+                            .font(.subheadline.weight(.semibold))
+                            Text("시간 차이 \(timeText(match.timeDifference)) · 거리 \(distanceText(match.distanceMeters))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 16)
                 }
-                .font(.subheadline)
-                .foregroundStyle(.tint)
-            } else {
-                Text("두 사람의 기록에서 같은 날 가까운 지역에 있었던 흔적을 찾지 못했어요.")
-                    .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 18)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
         }
-        .resultCardStyle()
     }
 
-    private var scoreBreakdownCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("점수는 이렇게 나왔어요", systemImage: "chart.bar.xaxis")
-                .font(.headline)
-
-            ScoreRow(
-                title: "가장 강한 교차",
-                detail: result.closestIntersection.map { strengthLabel(for: $0.strength) } ?? "발견되지 않음",
-                score: baseScore
-            )
-
-            Divider()
-
-            ScoreRow(
-                title: "반복해서 스친 날",
-                detail: result.additionalIntersectionDayCount > 0
-                    ? "첫날 외 \(result.additionalIntersectionDayCount)일"
-                    : "추가로 겹친 날 없음",
-                score: repeatedScore
-            )
-
-            Divider()
-
-            HStack {
-                Text("총 \(result.totalIntersectionDayCount)일의 교차 기록")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(result.score)점")
-                    .font(.headline)
-                    .foregroundStyle(.tint)
-            }
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.headline)
         }
-        .resultCardStyle()
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var privacyNote: some View {
         Label {
-            Text("사진 원본과 정확한 좌표는 공유하지 않았어요. 약 1km 지역과 3시간 구간으로 흐린 기록을 비교한 재미 요소예요.")
-        } icon: {
-            Image(systemName: "lock.shield")
-        }
+            Text("사진 원본과 정확한 좌표는 공유하지 않아요. 지도와 장소명도 약 1km 범위의 흐린 위치를 사용해요.")
+        } icon: { Image(systemName: "lock.shield") }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 4)
     }
 
-    private func strengthLabel(for strength: IntersectionStrength) -> String {
-        switch strength {
-        case .strong: "같은 시간대 · 같은 지역"
-        case .close: "가까운 시간대 · 인접 지역"
-        case .loose: "같은 날 · 가까운 지역"
-        }
+    private var shareText: String {
+        matches.isEmpty
+            ? "처음 만나기 전 우리의 기록을 비교해 봤어요. #본적있나"
+            : "처음 만나기 전, 우리는 \(result.totalIntersectionDayCount)일이나 스칠 뻔했대요. 운명 점수 \(result.score)점! #본적있나"
     }
 
-    private func strengthSymbol(for strength: IntersectionStrength) -> String {
-        switch strength {
-        case .strong: "bolt.heart.fill"
-        case .close: "point.3.connected.trianglepath.dotted"
-        case .loose: "location.fill"
-        }
+    private func timeText(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3_600
+        let minutes = (Int(seconds) % 3_600) / 60
+        if hours == 0 { return minutes == 0 ? "같은 시간대" : "약 \(minutes)분" }
+        if minutes == 0 { return "약 \(hours)시간" }
+        return "약 \(hours)시간 \(minutes)분"
     }
 
-    private func momentMessage(for strength: IntersectionStrength) -> String {
-        switch strength {
-        case .strong:
-            "두 사람 모두 같은 시간대에 같은 지역에 있었을 가능성이 있어요."
-        case .close:
-            "서로 가까운 시간대에 인접한 지역을 지나갔을 가능성이 있어요."
-        case .loose:
-            "같은 날, 가까운 지역에 각자의 흔적을 남겼어요."
-        }
+    private func distanceText(_ meters: Double) -> String {
+        meters < 1_000
+            ? "약 \(Int((meters / 10).rounded()) * 10)m"
+            : String(format: "약 %.1fkm", meters / 1_000)
     }
 
-    private static let localDateFormatter: DateFormatter = {
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateStyle = .long
-        formatter.timeStyle = .none
+        formatter.dateFormat = "yyyy년 M월 d일"
         return formatter
     }()
-
-}
-
-private struct ScoreRow: View {
-    let title: String
-    let detail: String
-    let score: Int
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Text("+\(score)")
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(score > 0 ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-        }
-    }
-}
-
-private extension View {
-    func resultCardStyle() -> some View {
-        padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
-    }
 }

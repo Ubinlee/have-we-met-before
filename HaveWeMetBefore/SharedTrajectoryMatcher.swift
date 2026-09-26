@@ -42,7 +42,13 @@ enum SharedTrajectoryMatcher {
                         strength: strength,
                         distanceMeters: distance,
                         timeDifference: Double(bucketDifference)
-                            * SharedVisitPrivacySettings.mvp.timeBucketDuration
+                            * SharedVisitPrivacySettings.mvp.timeBucketDuration,
+                        approximateLatitude: (
+                            firstRecord.approximateLatitude + secondRecord.approximateLatitude
+                        ) / 2,
+                        approximateLongitude: (
+                            firstRecord.approximateLongitude + secondRecord.approximateLongitude
+                        ) / 2
                     )
                 )
                 }

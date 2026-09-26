@@ -105,10 +105,10 @@
 				Base,
 			);
 			mainGroup = A10000000000000000000004;
-			preferredProjectObjectVersion = 77;
 			packageReferences = (
 				B20000000000000000000007 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 			);
+			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000005 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -239,9 +239,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "본 적 있나";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Light;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.byzip.havewemetbefore;
@@ -264,9 +265,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "본 적 있나";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "사진의 촬영 시각과 위치 정보를 분석해 두 사람의 과거 기록을 비교합니다. 사진 원본은 업로드하지 않습니다.";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Light;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.byzip.havewemetbefore;
@@ -299,6 +301,7 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		B20000000000000000000007 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -327,7 +330,6 @@
 			productName = FirebaseFirestore;
 		};
 /* End XCSwiftPackageProductDependency section */
-
 	};
 	rootObject = A1000000000000000000000A /* Project object */;
 }

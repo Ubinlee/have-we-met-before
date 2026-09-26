@@ -14,6 +14,7 @@ struct HaveWeMetBeforeApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(firebaseSession)
+                .preferredColorScheme(.light)
                 .task {
                     await firebaseSession.signInIfNeeded()
                 }

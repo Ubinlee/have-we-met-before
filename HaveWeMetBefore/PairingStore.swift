@@ -1,6 +1,16 @@
 import FirebaseFirestore
 import Foundation
 
+struct FriendConnectionSummary: Identifiable, Sendable {
+    let id: String
+    let nickname: String
+    let score: Int?
+    let intersectionDayCount: Int
+    let closestStrength: IntersectionStrength?
+    let firstMetDate: Date?
+    let isReady: Bool
+}
+
 @MainActor
 final class PairingStore: ObservableObject {
     enum OperationState: Equatable {
@@ -19,6 +29,7 @@ final class PairingStore: ObservableObject {
     @Published private(set) var savedFirstMetDate: Date?
     @Published private(set) var uploadedRecordCount = 0
     @Published private(set) var comparisonResult: DestinyScoreResult?
+    @Published private(set) var friendSummaries: [FriendConnectionSummary] = []
     @Published private(set) var state: OperationState = .idle
 
     private let database = Firestore.firestore()
@@ -46,12 +57,33 @@ final class PairingStore: ObservableObject {
                 .whereField("memberIds", arrayContains: userID)
                 .getDocuments()
 
+            friendSummaries = await loadFriendSummaries(
+                userID: userID,
+                pairs: snapshot.documents
+            )
+
             guard let pair = snapshot.documents.max(by: {
                 timestamp(from: $0.data()["updatedAt"])
                     < timestamp(from: $1.data()["updatedAt"])
             }) else { return }
 
             applyPair(documentID: pair.documentID, data: pair.data())
+        } catch {
+            state = .failed(message: userFacingMessage(for: error))
+        }
+    }
+
+    func openPair(pairID: String, userID: String) async {
+        comparisonResult = nil
+        state = .working
+        do {
+            let snapshot = try await database.collection("pairs").document(pairID).getDocument()
+            guard let data = snapshot.data() else {
+                state = .failed(message: "연결 정보를 찾을 수 없어요.")
+                return
+            }
+            applyPair(documentID: snapshot.documentID, data: data)
+            await compareWithFriend(userID: userID)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -438,6 +470,56 @@ final class PairingStore: ObservableObject {
                 "recordCount": recordCount,
                 "updatedAt": FieldValue.serverTimestamp()
             ])
+    }
+
+    private func loadFriendSummaries(
+        userID: String,
+        pairs: [QueryDocumentSnapshot]
+    ) async -> [FriendConnectionSummary] {
+        var summaries: [FriendConnectionSummary] = []
+
+        for pair in pairs {
+            let data = pair.data()
+            guard data["status"] as? String == "active",
+                  let memberIDs = data["memberIds"] as? [String],
+                  let friendID = memberIDs.first(where: { $0 != userID }) else {
+                continue
+            }
+
+            do {
+                async let member = database.collection("pairs").document(pair.documentID)
+                    .collection("members").document(friendID).getDocument()
+                async let result = database.collection("pairs").document(pair.documentID)
+                    .collection("results").document("current").getDocument()
+                let (memberSnapshot, resultSnapshot) = try await (member, result)
+                let memberData = memberSnapshot.data()
+                let resultData = resultSnapshot.data()
+                let rawStrength = integer(from: resultData?["closestLevel"])
+
+                summaries.append(
+                    FriendConnectionSummary(
+                        id: pair.documentID,
+                        nickname: memberData?["nickname"] as? String ?? "친구",
+                        score: integer(from: resultData?["score"]),
+                        intersectionDayCount: integer(from: resultData?["intersectionDayCount"]) ?? 0,
+                        closestStrength: rawStrength.flatMap(IntersectionStrength.init(rawValue:)),
+                        firstMetDate: (data["firstMetAt"] as? Timestamp)?.dateValue(),
+                        isReady: memberData?["analysisStatus"] as? String == "ready"
+                    )
+                )
+            } catch {
+                continue
+            }
+        }
+
+        return summaries.sorted {
+            switch ($0.score, $1.score) {
+            case let (left?, right?): left > right
+            case (_?, nil): true
+            case (nil, _?): false
+            case (nil, nil): $0.nickname < $1.nickname
+            }
+        }
     }
 
     private func memberIsReady(_ data: [String: Any]?, updatedAfter cutoff: Date) -> Bool {

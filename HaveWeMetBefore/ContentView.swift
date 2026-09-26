@@ -13,13 +13,14 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 24) {
                     header
+                    friendRanking
                     accountCard
                     content
                 }
                 .frame(maxWidth: .infinity)
                 .padding(24)
             }
-            .navigationTitle("내 기록 준비")
+            .navigationTitle("지나간 기록")
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 if analyzer.canReadPhotos, analyzer.scanState == .idle {
@@ -28,6 +29,56 @@ struct ContentView: View {
             }
         }
         .tint(Color(red: 0.45, green: 0.36, blue: 0.78))
+    }
+
+    @ViewBuilder
+    private var friendRanking: some View {
+        if case .authenticated(let userID) = firebaseSession.state {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("나의 친구 순위")
+                            .font(.title2.bold())
+                        Text("카드를 누르면 상세 결과를 볼 수 있어요.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "person.2.fill")
+                        .foregroundStyle(.tint)
+                }
+
+                if pairing.friendSummaries.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.largeTitle)
+                            .foregroundStyle(.tint)
+                        Text("아직 연결된 친구가 없어요")
+                            .font(.headline)
+                        Text("아래에서 초대를 만들거나 받은 초대를 수락해 보세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+                } else {
+                    ForEach(Array(pairing.friendSummaries.enumerated()), id: \.element.id) { index, friend in
+                        NavigationLink {
+                            FriendResultLoaderView(
+                                pairing: pairing,
+                                friend: friend,
+                                userID: userID
+                            )
+                        } label: {
+                            FriendRankingCard(rank: index + 1, friend: friend)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
     }
 
     private var header: some View {
@@ -394,6 +445,90 @@ private extension View {
         padding(20)
             .frame(maxWidth: .infinity)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+    }
+}
+
+private struct FriendRankingCard: View {
+    let rank: Int
+    let friend: FriendConnectionSummary
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Text("\(rank)")
+                .font(.system(size: 30, weight: .bold, design: .rounded))
+                .foregroundStyle(.tint)
+                .frame(width: 34)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(friend.nickname)
+                    .font(.headline)
+                Text(resultMessage)
+                    .font(.subheadline.weight(.medium))
+                Text(detailMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.footnote.bold())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(18)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+        }
+    }
+
+    private var resultMessage: String {
+        guard let strength = friend.closestStrength else {
+            return friend.isReady ? "결과를 확인해 보세요" : "친구의 분석을 기다리는 중이에요"
+        }
+        return switch strength {
+        case .strong: "어쩌면 진짜 마주쳤을 수도?"
+        case .close: "몇 번쯤 스쳐 갔을지도?"
+        case .loose: "같은 날 같은 동네를 지났어요"
+        }
+    }
+
+    private var detailMessage: String {
+        if let score = friend.score {
+            return "교차 \(friend.intersectionDayCount)일 · 운명 점수 \(score)"
+        }
+        return friend.isReady ? "비교 결과를 불러오는 중" : "분석 대기"
+    }
+}
+
+private struct FriendResultLoaderView: View {
+    @ObservedObject var pairing: PairingStore
+    let friend: FriendConnectionSummary
+    let userID: String
+
+    var body: some View {
+        Group {
+            if let result = pairing.comparisonResult,
+               pairing.activePairID == friend.id {
+                ResultView(
+                    result: result,
+                    firstMetDate: pairing.savedFirstMetDate ?? friend.firstMetDate ?? Date()
+                )
+            } else if case .failed(let message) = pairing.state {
+                ContentUnavailableView(
+                    "결과를 열 수 없어요",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(message)
+                )
+            } else {
+                ProgressView("\(friend.nickname)님과의 기록을 비교하고 있어요")
+            }
+        }
+        .navigationTitle(friend.nickname)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: friend.id) {
+            await pairing.openPair(pairID: friend.id, userID: userID)
+        }
     }
 }
 

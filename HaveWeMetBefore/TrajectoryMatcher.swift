@@ -28,6 +28,8 @@ struct TrajectoryIntersection: Identifiable, Sendable {
     let strength: IntersectionStrength
     let distanceMeters: Double
     let timeDifference: TimeInterval
+    let approximateLatitude: Double
+    let approximateLongitude: Double
 
     var occurredAt: Date {
         min(firstCapturedAt, secondCapturedAt)
@@ -99,7 +101,9 @@ enum TrajectoryMatcher {
                             secondCapturedAt: secondRecord.capturedAt,
                             strength: strength,
                             distanceMeters: distance,
-                            timeDifference: timeDifference
+                            timeDifference: timeDifference,
+                            approximateLatitude: (firstRecord.latitude + secondRecord.latitude) / 2,
+                            approximateLongitude: (firstRecord.longitude + secondRecord.longitude) / 2
                         )
                     )
                 }
