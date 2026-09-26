@@ -172,7 +172,17 @@ struct ContentView: View {
 
                 HStack {
                     Button("연결 상태 새로고침") {
-                        Task { await pairing.loadLatestPair(userID: userID) }
+                        Task {
+                            await pairing.loadLatestPair(userID: userID)
+                            if pairing.activePairID != nil,
+                               pairing.hasSavedFirstMetDate,
+                               analyzer.scanState == .finished {
+                                await pairing.syncVisitsAndCompare(
+                                    userID: userID,
+                                    events: analyzer.summary.visitEvents
+                                )
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
 
