@@ -7,6 +7,10 @@ struct ContentView: View {
     @StateObject private var pairing = PairingStore()
     @EnvironmentObject private var firebaseSession: FirebaseSession
     @Environment(\.openURL) private var openURL
+    @State private var showDateConfirmationAlert = false
+    @State private var showLatestResult = false
+    @State private var waitingForAnalysisResult = false
+    @State private var lastAutoPreparedKey = ""
 
     var body: some View {
         NavigationStack {
@@ -26,6 +30,24 @@ struct ContentView: View {
                 if analyzer.canReadPhotos, analyzer.scanState == .idle {
                     await analyzer.scan()
                 }
+            }
+            .navigationDestination(isPresented: $showLatestResult) {
+                if let result = pairing.comparisonResult {
+                    ResultView(
+                        result: result,
+                        firstMetDate: pairing.savedFirstMetDate ?? pairing.firstMetDate
+                    )
+                }
+            }
+            .alert("기준일 확인이 필요해요", isPresented: $showDateConfirmationAlert) {
+                Button("확인하러 가기", role: .cancel) {}
+            } message: {
+                Text("친구가 처음 알게 된 날을 제안했어요. 날짜를 확인하거나 수정해 주세요.")
+            }
+            .onChange(of: pairing.comparisonResult?.score) { _, newValue in
+                guard waitingForAnalysisResult, newValue != nil else { return }
+                waitingForAnalysisResult = false
+                showLatestResult = true
             }
         }
         .tint(Color(red: 0.45, green: 0.36, blue: 0.78))
@@ -205,68 +227,34 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        Button(pairing.hasSavedFirstMetDate ? "기준일 변경 저장" : "기준일 저장") {
-                            Task {
-                                await pairing.saveFirstMetDate(
-                                    userID: userID,
-                                    events: analyzer.summary.visitEvents
-                                )
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(pairing.isWorking || analyzer.scanState != .finished)
+                        firstMetDateActions(userID: userID)
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
 
-                HStack {
-                    Button("연결 상태 새로고침") {
-                        Task {
-                            await pairing.loadLatestPair(userID: userID)
-                            if pairing.activePairID != nil,
-                               pairing.hasSavedFirstMetDate,
-                               analyzer.scanState == .finished {
-                                await pairing.syncVisitsAndCompare(
-                                    userID: userID,
-                                    events: analyzer.summary.visitEvents
-                                )
-                            }
-                        }
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button(pairing.uploadedRecordCount > 0 ? "기록 갱신하고 비교" : "기록 올리고 비교") {
-                        Task {
-                            await pairing.syncVisitsAndCompare(
-                                userID: userID,
-                                events: analyzer.summary.visitEvents
-                            )
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                        pairing.isWorking
-                            || analyzer.scanState != .finished
-                            || !pairing.hasSavedFirstMetDate
-                    )
+                Button("분석 시작") {
+                    waitingForAnalysisResult = true
+                    Task { await pairing.startAnalysis(userID: userID) }
                 }
-
-                Button("친구 기록 다시 확인") {
-                    Task { await pairing.compareWithFriend(userID: userID) }
-                }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
                 .disabled(
                     pairing.isWorking
                         || pairing.activePairID == nil
-                        || !pairing.hasSavedFirstMetDate
+                        || !pairing.isFirstMetDateConfirmed
+                        || analyzer.scanState != .finished
                 )
 
                 if pairing.uploadedRecordCount > 0 {
-                    Text("서버에 올린 흐린 방문 기록: \(pairing.uploadedRecordCount)개")
+                    Label(
+                        "내 분석 준비 완료 · 흐린 기록 \(pairing.uploadedRecordCount)개",
+                        systemImage: "checkmark.circle.fill"
+                    )
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.green)
                 }
 
                 if let result = pairing.comparisonResult {
@@ -302,8 +290,79 @@ struct ContentView: View {
 
             pairingStatus
         }
-        .task(id: userID) {
+        .task(id: "\(userID)-\(analyzer.scanState)") {
             await pairing.loadLatestPair(userID: userID)
+            await autoPrepareVisitsIfNeeded(userID: userID)
+        }
+        .onChange(of: pairing.firstMetStatus) { _, _ in
+            if pairing.needsFirstMetDateConfirmation(userID: userID) {
+                showDateConfirmationAlert = true
+            }
+            Task { await autoPrepareVisitsIfNeeded(userID: userID) }
+        }
+        .onChange(of: pairing.firstMetProposedBy) { _, _ in
+            if pairing.needsFirstMetDateConfirmation(userID: userID) {
+                showDateConfirmationAlert = true
+            }
+        }
+    }
+
+    private func autoPrepareVisitsIfNeeded(userID: String) async {
+        guard pairing.isFirstMetDateConfirmed,
+              analyzer.scanState == .finished,
+              let pairID = pairing.activePairID,
+              let cutoff = pairing.savedFirstMetDate else { return }
+
+        let key = "\(pairID)-\(cutoff.timeIntervalSince1970)"
+        guard lastAutoPreparedKey != key else { return }
+        lastAutoPreparedKey = key
+        await pairing.prepareVisits(
+            userID: userID,
+            events: analyzer.summary.visitEvents
+        )
+    }
+
+    @ViewBuilder
+    private func firstMetDateActions(userID: String) -> some View {
+        if pairing.firstMetStatus == "pending" {
+            if pairing.needsFirstMetDateConfirmation(userID: userID) {
+                Label("친구가 이 날짜를 제안했어요", systemImage: "bell.badge.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+
+                Button("이 날짜가 맞아요") {
+                    Task {
+                        await pairing.confirmFirstMetDate(
+                            userID: userID,
+                            events: analyzer.summary.visitEvents
+                        )
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Label("친구의 확인을 기다리고 있어요", systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("다른 날짜로 수정 제안") {
+                Task { await pairing.proposeFirstMetDate(userID: userID) }
+            }
+            .buttonStyle(.bordered)
+        } else if pairing.isFirstMetDateConfirmed {
+            Label("두 사람이 확인한 기준일이에요", systemImage: "checkmark.seal.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.green)
+
+            Button("기준일 수정 제안") {
+                Task { await pairing.proposeFirstMetDate(userID: userID) }
+            }
+            .buttonStyle(.bordered)
+        } else {
+            Button("기준일 최초 등록") {
+                Task { await pairing.proposeFirstMetDate(userID: userID) }
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 
