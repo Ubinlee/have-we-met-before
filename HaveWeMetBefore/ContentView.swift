@@ -549,6 +549,7 @@ private struct HomeView: View {
         .padding(.horizontal, 24)
         .padding(.top, 28)
         .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(AppTheme.background.ignoresSafeArea())
         .navigationBarHidden(true)
     }
