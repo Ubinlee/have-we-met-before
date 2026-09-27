@@ -31,6 +31,7 @@ final class PairingStore: ObservableObject {
     @Published private(set) var firstMetStatus: String?
     @Published private(set) var uploadedRecordCount = 0
     @Published private(set) var comparisonResult: DestinyScoreResult?
+    @Published private(set) var completedAnalysisCount = 0
     @Published private(set) var friendSummaries: [FriendConnectionSummary] = []
     @Published private(set) var state: OperationState = .idle
     @Published private(set) var creatorID: String?
@@ -42,6 +43,7 @@ final class PairingStore: ObservableObject {
     private var membersListener: ListenerRegistration?
     private var currentUserID: String?
     private var analysisInFlight = false
+    private var resultCache: [String: DestinyScoreResult] = [:]
 
     var isWorking: Bool { state == .working }
 
@@ -98,6 +100,7 @@ final class PairingStore: ObservableObject {
 
             applyPair(documentID: pair.documentID, data: pair.data())
             listenToPair(documentID: pair.documentID)
+            _ = await loadStoredResult(pairID: pair.documentID)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -115,7 +118,8 @@ final class PairingStore: ObservableObject {
             }
             applyPair(documentID: snapshot.documentID, data: data)
             listenToPair(documentID: snapshot.documentID)
-            await compareWithFriend(userID: userID)
+            if await loadStoredResult(pairID: snapshot.documentID) { return }
+            if isFirstMetDateConfirmed { await compareWithFriend(userID: userID) }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -509,6 +513,8 @@ final class PairingStore: ObservableObject {
             )
 
             comparisonResult = result
+            resultCache[pairID] = result
+            completedAnalysisCount += 1
             state = .succeeded(
                 message: intersections.isEmpty
                     ? "겹치는 기록을 찾지 못했어요."
@@ -561,6 +567,21 @@ final class PairingStore: ObservableObject {
             "schemaVersion": 1
         ]
 
+        data["rankedIntersections"] = result.rankedIntersections.map { intersection in
+            [
+                "id": intersection.id,
+                "firstRecordID": intersection.firstRecordID,
+                "secondRecordID": intersection.secondRecordID,
+                "firstCapturedAt": Timestamp(date: intersection.firstCapturedAt),
+                "secondCapturedAt": Timestamp(date: intersection.secondCapturedAt),
+                "strength": intersection.strength.rawValue,
+                "distanceMeters": intersection.distanceMeters,
+                "timeDifference": intersection.timeDifference,
+                "approximateLatitude": intersection.approximateLatitude,
+                "approximateLongitude": intersection.approximateLongitude
+            ]
+        }
+
         if let closest = result.closestIntersection,
            let closestRecord = ownRecords.first(where: { $0.id == closest.firstRecordID }) {
             data["closestLevel"] = closest.strength.rawValue
@@ -575,6 +596,71 @@ final class PairingStore: ObservableObject {
             .collection("results")
             .document("current")
             .setData(data)
+    }
+
+    @discardableResult
+    private func loadStoredResult(pairID: String) async -> Bool {
+        if let cached = resultCache[pairID] {
+            comparisonResult = cached
+            state = .succeeded(message: "저장된 분석 결과를 열었어요.")
+            return true
+        }
+
+        do {
+            let snapshot = try await database.collection("pairs").document(pairID)
+                .collection("results").document("current").getDocument()
+            guard let data = snapshot.data(),
+                  let score = integer(from: data["score"]),
+                  let dayCount = integer(from: data["intersectionDayCount"]) else {
+                return false
+            }
+
+            let rankedData = data["rankedIntersections"] as? [[String: Any]] ?? []
+            let ranked = rankedData.compactMap(storedIntersection)
+            guard score == 0 || !ranked.isEmpty else { return false }
+
+            let result = DestinyScoreResult(
+                score: score,
+                closestIntersection: ranked.first,
+                totalIntersectionDayCount: dayCount,
+                additionalIntersectionDayCount: max(0, dayCount - 1),
+                rankedIntersections: ranked
+            )
+            resultCache[pairID] = result
+            comparisonResult = result
+            state = .succeeded(message: "저장된 분석 결과를 열었어요.")
+            return true
+        } catch {
+            state = .failed(message: userFacingMessage(for: error))
+            return false
+        }
+    }
+
+    private func storedIntersection(_ data: [String: Any]) -> TrajectoryIntersection? {
+        guard let id = data["id"] as? String,
+              let firstRecordID = data["firstRecordID"] as? String,
+              let secondRecordID = data["secondRecordID"] as? String,
+              let firstCapturedAt = (data["firstCapturedAt"] as? Timestamp)?.dateValue(),
+              let secondCapturedAt = (data["secondCapturedAt"] as? Timestamp)?.dateValue(),
+              let strengthRaw = integer(from: data["strength"]),
+              let strength = IntersectionStrength(rawValue: strengthRaw),
+              let distanceMeters = double(from: data["distanceMeters"]),
+              let timeDifference = double(from: data["timeDifference"]),
+              let latitude = double(from: data["approximateLatitude"]),
+              let longitude = double(from: data["approximateLongitude"]) else { return nil }
+
+        return TrajectoryIntersection(
+            id: id,
+            firstRecordID: firstRecordID,
+            secondRecordID: secondRecordID,
+            firstCapturedAt: firstCapturedAt,
+            secondCapturedAt: secondCapturedAt,
+            strength: strength,
+            distanceMeters: distanceMeters,
+            timeDifference: timeDifference,
+            approximateLatitude: latitude,
+            approximateLongitude: longitude
+        )
     }
 
     private func saveMember(
@@ -789,6 +875,11 @@ final class PairingStore: ObservableObject {
     private func integer(from value: Any?) -> Int? {
         if let number = value as? NSNumber { return number.intValue }
         return value as? Int
+    }
+
+    private func double(from value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        return value as? Double
     }
 
     private func userFacingMessage(for error: Error) -> String {

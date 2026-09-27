@@ -73,8 +73,8 @@ struct ContentView: View {
                         guard pairing.activePairID != nil else { return }
                         activeSheet = .pair
                     }
-                    .onChange(of: pairing.comparisonResult?.score) { _, score in
-                        if score != nil {
+                    .onChange(of: pairing.completedAnalysisCount) { _, count in
+                        if count > 0 {
                             activeSheet = nil
                             showLatestResult = true
                         }
@@ -135,7 +135,8 @@ struct ContentView: View {
         guard pairing.isFirstMetDateConfirmed,
               analyzer.scanState == .finished,
               let pairID = pairing.activePairID,
-              let cutoff = pairing.savedFirstMetDate else { return }
+              let cutoff = pairing.savedFirstMetDate,
+              pairing.comparisonResult == nil else { return }
 
         let key = "\(pairID)-\(cutoff.timeIntervalSince1970)"
         guard lastPreparedKey != key else { return }
@@ -478,13 +479,8 @@ private struct HomeView: View {
                 Button(action: onPairStatus) {
                     HStack {
                         Image(systemName: pairing.isFirstMetDateConfirmed ? "sparkles" : "calendar.badge.clock")
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(pairing.connectedFriendNickname)님과 연결됐어요")
-                                .font(.system(size: 13, weight: .bold))
-                            Text(pairStatusDetail)
-                                .font(.system(size: 11))
-                                .foregroundStyle(AppTheme.secondaryText)
-                        }
+                        Text(connectionStatusTitle)
+                            .font(.system(size: 13, weight: .bold))
                         Spacer()
                         Image(systemName: "chevron.right")
                     }
@@ -514,7 +510,6 @@ private struct HomeView: View {
                         NavigationLink {
                             FriendResultLoaderView(
                                 pairing: pairing,
-                                analyzer: analyzer,
                                 friend: friend,
                                 userID: userID
                             )
@@ -558,13 +553,15 @@ private struct HomeView: View {
         .navigationBarHidden(true)
     }
 
-    private var pairStatusDetail: String {
-        if pairing.needsFirstMetDateConfirmation(userID: userID) { return "친구가 입력한 기준일을 확인해 주세요" }
-        if pairing.firstMetStatus == "pending" { return "친구의 기준일 확인을 기다리고 있어요" }
-        if pairing.isFirstMetDateConfirmed { return "두 사람의 기록을 비교하고 있어요" }
-        if pairing.activePairID != nil { return "처음 알게 된 날을 정해 주세요" }
-        return "친구가 초대를 수락하면 알려 드릴게요"
+    private var connectionStatusTitle: String {
+        if pairing.isFirstMetDateConfirmed { return "결과를 분석중이에요" }
+        let nickname = pairing.connectedFriendNickname
+        guard let scalar = nickname.unicodeScalars.last else { return "친구와 연결됐어요" }
+        let hangulIndex = Int(scalar.value) - 0xAC00
+        let particle = (0...11_171).contains(hangulIndex) && hangulIndex % 28 != 0 ? "과" : "와"
+        return "\(nickname)\(particle) 연결됐어요"
     }
+
 }
 
 private struct InviteCreateView: View {
@@ -852,7 +849,6 @@ private struct FriendRankingRow: View {
 
 private struct FriendResultLoaderView: View {
     @ObservedObject var pairing: PairingStore
-    @ObservedObject var analyzer: PhotoLibraryAnalyzer
     let friend: FriendConnectionSummary
     let userID: String
 
@@ -870,14 +866,11 @@ private struct FriendResultLoaderView: View {
                     Task { await pairing.openPair(pairID: friend.id, userID: userID) }
                 }
             } else {
-                ProgressView("\(friend.nickname)님과의 결과를 불러오고 있어요")
+                ProgressView()
             }
         }
         .task(id: friend.id) {
             await pairing.openPair(pairID: friend.id, userID: userID)
-            guard pairing.isFirstMetDateConfirmed else { return }
-            await pairing.prepareVisits(userID: userID, events: analyzer.summary.visitEvents)
-            await pairing.startAnalysis(userID: userID)
         }
     }
 }

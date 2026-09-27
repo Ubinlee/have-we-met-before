@@ -165,6 +165,7 @@ service cloud.firestore {
       return data.keys().hasAll([
           'score',
           'intersectionDayCount',
+          'rankedIntersections',
           'generatedBy',
           'createdAt',
           'schemaVersion'
@@ -176,6 +177,7 @@ service cloud.firestore {
           'closestTimeBucketIndex',
           'closestLatitudeCell',
           'closestLongitudeCell',
+          'rankedIntersections',
           'generatedBy',
           'createdAt',
           'schemaVersion'
@@ -185,6 +187,14 @@ service cloud.firestore {
         && data.score <= 100
         && data.intersectionDayCount is int
         && data.intersectionDayCount >= 0
+        && data.rankedIntersections is list
+        && data.rankedIntersections.size() <= 3
+        && (data.rankedIntersections.size() < 1
+          || validStoredIntersection(data.rankedIntersections[0]))
+        && (data.rankedIntersections.size() < 2
+          || validStoredIntersection(data.rankedIntersections[1]))
+        && (data.rankedIntersections.size() < 3
+          || validStoredIntersection(data.rankedIntersections[2]))
         && (!('closestLevel' in data)
           || data.closestLevel in [1, 2, 3])
         && (!('closestTimeBucketIndex' in data)
@@ -196,6 +206,49 @@ service cloud.firestore {
         && data.generatedBy == request.auth.uid
         && data.createdAt is timestamp
         && data.schemaVersion == 1;
+    }
+
+    function validStoredIntersection(data) {
+      return data.keys().hasAll([
+          'id',
+          'firstRecordID',
+          'secondRecordID',
+          'firstCapturedAt',
+          'secondCapturedAt',
+          'strength',
+          'distanceMeters',
+          'timeDifference',
+          'approximateLatitude',
+          'approximateLongitude'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'firstRecordID',
+          'secondRecordID',
+          'firstCapturedAt',
+          'secondCapturedAt',
+          'strength',
+          'distanceMeters',
+          'timeDifference',
+          'approximateLatitude',
+          'approximateLongitude'
+        ])
+        && data.id is string
+        && data.firstRecordID is string
+        && data.secondRecordID is string
+        && data.firstCapturedAt is timestamp
+        && data.secondCapturedAt is timestamp
+        && data.strength in [1, 2, 3]
+        && data.distanceMeters is number
+        && data.distanceMeters >= 0
+        && data.timeDifference is number
+        && data.timeDifference >= 0
+        && data.approximateLatitude is number
+        && data.approximateLatitude >= -90
+        && data.approximateLatitude <= 90
+        && data.approximateLongitude is number
+        && data.approximateLongitude >= -180
+        && data.approximateLongitude <= 180;
     }
 
     match /users/{userId} {
