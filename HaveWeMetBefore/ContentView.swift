@@ -388,6 +388,8 @@ private struct OnboardingFlowView: View {
                 Divider()
                 SummaryRow(title: "위치 정보가 있는 사진", value: "\(analyzer.summary.validRecords.count.formatted())장")
                 Divider()
+                SummaryRow(title: "받거나 가져온 사진 제외", value: "\(analyzer.summary.excludedImportedCount.formatted())장")
+                Divider()
                 SummaryRow(title: "유효한 방문 기록", value: "\(analyzer.summary.visitEvents.count.formatted())개")
                 Divider()
                 SummaryRow(title: "분석 기간", value: analysisPeriod)
@@ -856,7 +858,7 @@ private struct FriendRankingRow: View {
                     .foregroundStyle(AppTheme.secondaryText)
             }
             Spacer()
-            Text(friend.score.map(String.init) ?? "–")
+            Text(isAnalyzing ? "–" : friend.score.map(String.init) ?? "–")
                 .font(.system(size: 15, weight: .bold))
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .bold))

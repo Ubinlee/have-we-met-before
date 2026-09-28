@@ -13,6 +13,8 @@ struct FriendConnectionSummary: Identifiable, Sendable {
 
 @MainActor
 final class PairingStore: ObservableObject {
+    private static let recordSchemaVersion = 2
+
     enum OperationState: Equatable {
         case idle
         case working
@@ -573,7 +575,7 @@ final class PairingStore: ObservableObject {
             "intersectionDayCount": result.totalIntersectionDayCount,
             "generatedBy": userID,
             "createdAt": FieldValue.serverTimestamp(),
-            "schemaVersion": 1
+            "schemaVersion": Self.recordSchemaVersion
         ]
 
         data["rankedIntersections"] = result.rankedIntersections.map { intersection in
@@ -620,6 +622,7 @@ final class PairingStore: ObservableObject {
             let snapshot = try await database.collection("pairs").document(pairID)
                 .collection("results").document("current").getDocument()
             guard let data = snapshot.data(),
+                  integer(from: data["schemaVersion"]) == Self.recordSchemaVersion,
                   let score = integer(from: data["score"]),
                   let dayCount = integer(from: data["intersectionDayCount"]) else {
                 return false
@@ -690,6 +693,7 @@ final class PairingStore: ObservableObject {
                 "nickname": nickname,
                 "analysisStatus": analysisStatus,
                 "recordCount": recordCount,
+                "recordSchemaVersion": Self.recordSchemaVersion,
                 "updatedAt": FieldValue.serverTimestamp()
             ])
     }
@@ -726,7 +730,7 @@ final class PairingStore: ObservableObject {
                         intersectionDayCount: integer(from: resultData?["intersectionDayCount"]) ?? 0,
                         closestStrength: rawStrength.flatMap(IntersectionStrength.init(rawValue:)),
                         firstMetDate: (data["firstMetAt"] as? Timestamp)?.dateValue(),
-                        isReady: memberData?["analysisStatus"] as? String == "ready"
+                        isReady: memberIsReady(memberData)
                     )
                 )
             } catch {
@@ -746,6 +750,7 @@ final class PairingStore: ObservableObject {
 
     private func memberIsReady(_ data: [String: Any]?) -> Bool {
         data?["analysisStatus"] as? String == "ready"
+            && integer(from: data?["recordSchemaVersion"]) == Self.recordSchemaVersion
     }
 
     private func visitsCollection(pairID: String, userID: String) -> CollectionReference {
@@ -847,13 +852,13 @@ final class PairingStore: ObservableObject {
             .addSnapshotListener { [weak self] snapshot, error in
                 guard error == nil,
                       let documents = snapshot?.documents,
-                      documents.count == 2,
-                      documents.allSatisfy({ $0.data()["analysisStatus"] as? String == "ready" }) else {
+                      documents.count == 2 else {
                     return
                 }
 
                 Task { @MainActor [weak self] in
                     guard let self,
+                          documents.allSatisfy({ self.memberIsReady($0.data()) }),
                           self.isFirstMetDateConfirmed,
                           self.comparisonResult == nil,
                           !self.analysisInFlight else { return }

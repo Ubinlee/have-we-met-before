@@ -13,6 +13,7 @@ struct PhotoScanSummary: Sendable {
     let totalPhotos: Int
     let validRecords: [PhotoVisitRecord]
     let visitEvents: [VisitEvent]
+    let excludedImportedCount: Int
     let missingLocationCount: Int
     let missingDateCount: Int
     let invalidCoordinateCount: Int
@@ -22,6 +23,7 @@ struct PhotoScanSummary: Sendable {
         totalPhotos: 0,
         validRecords: [],
         visitEvents: [],
+        excludedImportedCount: 0,
         missingLocationCount: 0,
         missingDateCount: 0,
         invalidCoordinateCount: 0,
@@ -82,6 +84,7 @@ private enum PhotoLibraryScanner {
 
         let assets = PHAsset.fetchAssets(with: .image, options: options)
         var records: [PhotoVisitRecord] = []
+        var excludedImportedCount = 0
         var missingLocationCount = 0
         var missingDateCount = 0
         var invalidCoordinateCount = 0
@@ -91,6 +94,11 @@ private enum PhotoLibraryScanner {
         assets.enumerateObjects { asset, _, _ in
             guard let capturedAt = asset.creationDate else {
                 missingDateCount += 1
+                return
+            }
+
+            guard isLikelyOwnedCapture(asset, capturedAt: capturedAt) else {
+                excludedImportedCount += 1
                 return
             }
 
@@ -130,11 +138,38 @@ private enum PhotoLibraryScanner {
             totalPhotos: assets.count,
             validRecords: records,
             visitEvents: VisitEventBuilder.build(from: records),
+            excludedImportedCount: excludedImportedCount,
             missingLocationCount: missingLocationCount,
             missingDateCount: missingDateCount,
             invalidCoordinateCount: invalidCoordinateCount,
             duplicateCount: duplicateCount
         )
+    }
+
+    private static func isLikelyOwnedCapture(
+        _ asset: PHAsset,
+        capturedAt: Date
+    ) -> Bool {
+        let source = asset.sourceType
+        guard source.contains(.typeUserLibrary),
+              !source.contains(.typeCloudShared),
+              !source.contains(.typeiTunesSynced),
+              !asset.mediaSubtypes.contains(.photoScreenshot) else {
+            return false
+        }
+
+        // iOS 26 exposes when an asset entered the library separately from when
+        // it was captured. Camera photos are added immediately; received or
+        // imported originals usually retain an older capture date.
+        if #available(iOS 26.0, *) {
+            let additionDelay = asset.addedDate.timeIntervalSince(capturedAt)
+            return additionDelay >= -5 && additionDelay <= 60
+        }
+
+        // Earlier iOS versions expose no public ownership signal for a photo in
+        // the main library. Keep local-library camera candidates rather than
+        // silently deleting legitimate historical records.
+        return true
     }
 
     private static func isValid(latitude: Double, longitude: Double) -> Bool {

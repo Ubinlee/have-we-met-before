@@ -48,7 +48,7 @@ enum SharedVisitRecordBuilder {
         )
         let latitudeCell = Int(floor(event.latitude / settings.coordinateStep))
         let longitudeCell = Int(floor(event.longitude / settings.coordinateStep))
-        let source = "v1:\(timeBucketIndex):\(latitudeCell):\(longitudeCell)"
+        let source = "v2:\(timeBucketIndex):\(latitudeCell):\(longitudeCell)"
         let digest = SHA256.hash(data: Data(source.utf8))
         let id = digest.map { String(format: "%02x", $0) }.joined()
 
@@ -57,7 +57,7 @@ enum SharedVisitRecordBuilder {
             timeBucketIndex: timeBucketIndex,
             latitudeCell: latitudeCell,
             longitudeCell: longitudeCell,
-            schemaVersion: 1
+            schemaVersion: 2
         )
     }
 }
