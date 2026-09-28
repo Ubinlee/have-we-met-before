@@ -114,7 +114,6 @@ struct ContentView: View {
         case .pair:
             PairStatusFlowView(
                 pairing: pairing,
-                analyzer: analyzer,
                 userID: userID
             )
         case .settings:
@@ -475,7 +474,9 @@ private struct HomeView: View {
             .foregroundStyle(AppTheme.primary)
             .padding(.top, -20)
 
-            if pairing.activePairID != nil, pairing.comparisonResult == nil {
+            if pairing.activePairID != nil,
+               !pairing.isFirstMetDateConfirmed,
+               pairing.comparisonResult == nil {
                 Button(action: onPairStatus) {
                     HStack {
                         Image(systemName: pairing.isFirstMetDateConfirmed ? "sparkles" : "calendar.badge.clock")
@@ -507,14 +508,25 @@ private struct HomeView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(pairing.friendSummaries.enumerated()), id: \.element.id) { index, friend in
+                        let isAnalyzing = pairing.activePairID == friend.id
+                            && pairing.isFirstMetDateConfirmed
+                            && pairing.comparisonResult == nil
                         NavigationLink {
-                            FriendResultLoaderView(
-                                pairing: pairing,
-                                friend: friend,
-                                userID: userID
-                            )
+                            if isAnalyzing {
+                                AnalysisProgressView(pairing: pairing)
+                            } else {
+                                FriendResultLoaderView(
+                                    pairing: pairing,
+                                    friend: friend,
+                                    userID: userID
+                                )
+                            }
                         } label: {
-                            FriendRankingRow(rank: index + 1, friend: friend)
+                            FriendRankingRow(
+                                rank: index + 1,
+                                friend: friend,
+                                isAnalyzing: isAnalyzing
+                            )
                         }
                         .buttonStyle(.plain)
                         if friend.id != pairing.friendSummaries.last?.id { Divider() }
@@ -700,7 +712,6 @@ private struct InviteJoinFlowView: View {
 
 private struct PairStatusFlowView: View {
     @ObservedObject var pairing: PairingStore
-    @ObservedObject var analyzer: PhotoLibraryAnalyzer
     let userID: String
     @Environment(\.dismiss) private var dismiss
 
@@ -719,7 +730,7 @@ private struct PairStatusFlowView: View {
                     FirstMetDateEntryView(pairing: pairing, userID: userID) { dismiss() }
                 } else if pairing.firstMetStatus == "pending" {
                     if pairing.needsFirstMetDateConfirmation(userID: userID) {
-                        FirstMetDateConfirmationView(pairing: pairing, analyzer: analyzer, userID: userID)
+                        FirstMetDateConfirmationView(pairing: pairing, userID: userID)
                     } else {
                         StatusMessageView(
                             title: "기준일 확인을\n기다리고 있어요",
@@ -730,13 +741,17 @@ private struct PairStatusFlowView: View {
                         )
                     }
                 } else {
-                    StatusMessageView(
-                        title: pairing.comparisonResult == nil ? "두 사람의 기록을\n비교하고 있어요" : "분석 결과가 도착했어요",
-                        message: pairing.comparisonResult == nil ? "기준일 이전의 흐린 방문 기록만 비교해요." : "홈의 친구 카드에서 결과를 확인할 수 있어요.",
-                        symbol: pairing.comparisonResult == nil ? "sparkles" : "checkmark.circle.fill",
-                        buttonTitle: "확인",
-                        action: { dismiss() }
-                    )
+                    if pairing.comparisonResult == nil {
+                        AnalysisProgressView(pairing: pairing, onBack: { dismiss() })
+                    } else {
+                        StatusMessageView(
+                            title: "분석 결과가 도착했어요",
+                            message: "홈의 친구 카드에서 결과를 확인할 수 있어요.",
+                            symbol: "checkmark.circle.fill",
+                            buttonTitle: "확인",
+                            action: { dismiss() }
+                        )
+                    }
                 }
             }
         }
@@ -777,7 +792,6 @@ private struct FirstMetDateEntryView: View {
 
 private struct FirstMetDateConfirmationView: View {
     @ObservedObject var pairing: PairingStore
-    @ObservedObject var analyzer: PhotoLibraryAnalyzer
     let userID: String
     @State private var editing = false
 
@@ -805,8 +819,7 @@ private struct FirstMetDateConfirmationView: View {
                 Spacer()
                 Button("동의하기") {
                     Task {
-                        await pairing.confirmFirstMetDate(userID: userID, events: analyzer.summary.visitEvents)
-                        await pairing.startAnalysis(userID: userID)
+                        await pairing.confirmFirstMetDate(userID: userID)
                     }
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
@@ -823,16 +836,22 @@ private struct FirstMetDateConfirmationView: View {
 private struct FriendRankingRow: View {
     let rank: Int
     let friend: FriendConnectionSummary
+    var isAnalyzing = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Text("\(rank)")
+            Text(isAnalyzing || friend.score == nil ? "–" : "\(rank)")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(AppTheme.primary)
                 .frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text(friend.nickname).font(.system(size: 14, weight: .bold))
-                Text(friend.closestStrength?.relationshipLabel ?? (friend.isReady ? "아직 접점 못 찾은 사이" : "분석을 기다리는 중"))
+                Text(
+                    isAnalyzing
+                        ? "결과를 분석중이에요"
+                        : friend.closestStrength?.relationshipLabel
+                            ?? (friend.isReady ? "아직 접점 못 찾은 사이" : "분석을 기다리는 중")
+                )
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.secondaryText)
             }
@@ -845,6 +864,84 @@ private struct FriendRankingRow: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 61)
+    }
+}
+
+private struct AnalysisProgressView: View {
+    @ObservedObject var pairing: PairingStore
+    var onBack: (() -> Void)?
+    @Environment(\.dismiss) private var dismiss
+
+    private var progress: Double {
+        min(max(pairing.analysisProgress, 0.08), 0.99)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text("사진 분석")
+                    .font(.system(size: 15, weight: .bold))
+
+                HStack {
+                    Button(action: goBack) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 28, height: 28, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .frame(height: 44)
+
+            Spacer(minLength: 90)
+
+            ZStack {
+                Circle()
+                    .stroke(AppTheme.divider, lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        AppTheme.primary,
+                        style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.35), value: progress)
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.system(size: 36, weight: .regular))
+                    .monospacedDigit()
+            }
+            .frame(width: 154, height: 154)
+
+            VStack(spacing: 8) {
+                Text("사진 기록을 살펴보고 있어요")
+                    .font(.system(size: 18, weight: .bold))
+                Text("사진에 남은 시간과 위치 정보를 확인하고 있어요.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(AppTheme.secondaryText)
+                Text("앱을 닫아도 분석은 계속돼요.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppTheme.primary)
+            }
+            .multilineTextAlignment(.center)
+            .padding(.top, 32)
+
+            Spacer()
+
+            Text("분석 취소")
+                .font(.system(size: 13))
+                .foregroundStyle(AppTheme.secondaryText)
+                .padding(.bottom, 22)
+        }
+        .padding(.horizontal, 19)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(AppTheme.text)
+        .background(AppTheme.background.ignoresSafeArea())
+        .navigationBarBackButtonHidden(true)
+    }
+
+    private func goBack() {
+        if let onBack { onBack() } else { dismiss() }
     }
 }
 

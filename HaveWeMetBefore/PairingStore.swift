@@ -31,6 +31,7 @@ final class PairingStore: ObservableObject {
     @Published private(set) var firstMetStatus: String?
     @Published private(set) var uploadedRecordCount = 0
     @Published private(set) var comparisonResult: DestinyScoreResult?
+    @Published private(set) var analysisProgress = 0.0
     @Published private(set) var completedAnalysisCount = 0
     @Published private(set) var friendSummaries: [FriendConnectionSummary] = []
     @Published private(set) var state: OperationState = .idle
@@ -340,13 +341,14 @@ final class PairingStore: ObservableObject {
             firstMetProposedBy = userID
             uploadedRecordCount = 0
             comparisonResult = nil
+            analysisProgress = 0
             state = .succeeded(message: "기준일을 제안했어요. 친구의 확인을 기다리고 있어요.")
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
     }
 
-    func confirmFirstMetDate(userID: String, events: [VisitEvent]) async {
+    func confirmFirstMetDate(userID: String) async {
         guard let pairID = activePairID,
               savedFirstMetDate != nil,
               firstMetStatus == "pending" else {
@@ -355,6 +357,7 @@ final class PairingStore: ObservableObject {
         }
 
         state = .working
+        analysisProgress = max(analysisProgress, 0.08)
         do {
             try await database.collection("pairs").document(pairID).updateData([
                 "firstMetStatus": "confirmed",
@@ -363,7 +366,6 @@ final class PairingStore: ObservableObject {
             ])
             firstMetStatus = "confirmed"
             state = .succeeded(message: "두 사람이 기준일을 확인했어요. 기록을 자동으로 준비할게요.")
-            await prepareVisits(userID: userID, events: events)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -384,6 +386,7 @@ final class PairingStore: ObservableObject {
             from: events.filter { $0.capturedAt < cutoffDate }
         )
         state = .working
+        analysisProgress = max(analysisProgress, 0.18)
 
         do {
             try await saveMember(
@@ -395,6 +398,7 @@ final class PairingStore: ObservableObject {
             )
 
             try await replaceVisits(pairID: pairID, userID: userID, records: records)
+            analysisProgress = max(analysisProgress, 0.48)
 
             try await saveMember(
                 pairID: pairID,
@@ -405,6 +409,7 @@ final class PairingStore: ObservableObject {
             )
 
             uploadedRecordCount = records.count
+            analysisProgress = max(analysisProgress, 0.68)
             state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -416,6 +421,7 @@ final class PairingStore: ObservableObject {
             state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
             return
         }
+        analysisProgress = max(analysisProgress, 0.72)
         await compareWithFriend(userID: userID)
     }
 
@@ -426,6 +432,7 @@ final class PairingStore: ObservableObject {
         }
 
         state = .working
+        analysisProgress = max(analysisProgress, 0.76)
 
         do {
             let pairSnapshot = try await database
@@ -488,6 +495,7 @@ final class PairingStore: ObservableObject {
             async let friendSnapshot = visitsCollection(pairID: pairID, userID: friendID)
                 .getDocuments()
             let (ownDocuments, friendDocuments) = try await (ownSnapshot, friendSnapshot)
+            analysisProgress = max(analysisProgress, 0.9)
 
             let ownRecords = ownDocuments.documents
                 .compactMap(sharedVisitRecord)
@@ -514,6 +522,7 @@ final class PairingStore: ObservableObject {
 
             comparisonResult = result
             resultCache[pairID] = result
+            analysisProgress = 1
             completedAnalysisCount += 1
             state = .succeeded(
                 message: intersections.isEmpty
@@ -602,6 +611,7 @@ final class PairingStore: ObservableObject {
     private func loadStoredResult(pairID: String) async -> Bool {
         if let cached = resultCache[pairID] {
             comparisonResult = cached
+            analysisProgress = 1
             state = .succeeded(message: "저장된 분석 결과를 열었어요.")
             return true
         }
@@ -628,6 +638,7 @@ final class PairingStore: ObservableObject {
             )
             resultCache[pairID] = result
             comparisonResult = result
+            analysisProgress = 1
             state = .succeeded(message: "저장된 분석 결과를 열었어요.")
             return true
         } catch {
