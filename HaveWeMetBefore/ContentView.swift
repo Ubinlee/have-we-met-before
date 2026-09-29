@@ -511,6 +511,7 @@ private struct InviteCreateView: View {
     @ObservedObject var pairing: PairingStore
     let userID: String
     @Environment(\.dismiss) private var dismiss
+    @State private var showsNicknameRecovery = false
 
     var body: some View {
         NavigationStack {
@@ -519,6 +520,10 @@ private struct InviteCreateView: View {
                 message: pairing.inviteID.isEmpty ? "초대 코드는 한 명의 친구와 연결할 때 사용해요." : "초대 코드는 24시간 동안 사용할 수 있어요.",
                 backAction: { dismiss() }
             ) {
+                if showsNicknameRecovery {
+                    InviteNicknameField(pairing: pairing)
+                        .padding(.top, 32)
+                }
                 if !pairing.inviteID.isEmpty {
                     InfoCard {
                         HStack {
@@ -546,17 +551,17 @@ private struct InviteCreateView: View {
                     .foregroundStyle(AppTheme.primary)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 14)
-                    .disabled(pairing.isCreatingInvite)
-                    .opacity(pairing.isCreatingInvite ? 0.6 : 1)
+                    .disabled(pairing.isCreatingInvite || !pairing.hasValidNickname)
+                    .opacity(pairing.isCreatingInvite || !pairing.hasValidNickname ? 0.35 : 1)
                 }
                 Spacer()
                 if pairing.inviteID.isEmpty {
                     Button(pairing.isCreatingInvite ? "초대 코드 만드는 중..." : "초대 코드 만들기") {
                         Task { await pairing.createPair(userID: userID) }
                     }
-                        .buttonStyle(PrimaryActionButtonStyle())
-                        .disabled(pairing.isCreatingInvite)
-                        .opacity(pairing.isCreatingInvite ? 0.6 : 1)
+                    .buttonStyle(PrimaryActionButtonStyle())
+                    .disabled(pairing.isCreatingInvite || !pairing.hasValidNickname)
+                    .opacity(pairing.isCreatingInvite || !pairing.hasValidNickname ? 0.35 : 1)
                 } else {
                     ShareLink(item: "본 적 있나? 초대 코드: \(pairing.inviteID)") {
                         Text("초대 메시지 공유")
@@ -564,6 +569,10 @@ private struct InviteCreateView: View {
                     .buttonStyle(PrimaryActionButtonStyle())
                 }
             }
+        }
+        .onAppear {
+            pairing.clearOperationError()
+            showsNicknameRecovery = !pairing.hasValidNickname
         }
     }
 }
@@ -574,6 +583,7 @@ private struct InviteJoinFlowView: View {
     let userID: String
     @Environment(\.dismiss) private var dismiss
     @State private var stage: Stage = .code
+    @State private var showsNicknameRecovery = false
 
     var body: some View {
         NavigationStack {
@@ -591,6 +601,10 @@ private struct InviteJoinFlowView: View {
             message: "친구에게 받은 6자리 코드를 입력하면 바로 연결 단계로 넘어가요.",
             backAction: { dismiss() }
         ) {
+            if showsNicknameRecovery {
+                InviteNicknameField(pairing: pairing)
+                    .padding(.top, 32)
+            }
             TextField("GR8DCD", text: $pairing.joinInviteID)
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
@@ -605,6 +619,7 @@ private struct InviteJoinFlowView: View {
                 .onChange(of: pairing.joinInviteID) { _, value in
                     let normalized = String(value.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(6))
                     if normalized != value { pairing.joinInviteID = normalized }
+                    pairing.clearOperationError()
                 }
             operationMessage
             Spacer()
@@ -616,6 +631,10 @@ private struct InviteJoinFlowView: View {
             .buttonStyle(PrimaryActionButtonStyle())
             .disabled(!pairing.canPreviewInvite)
             .opacity(pairing.canPreviewInvite ? 1 : 0.35)
+        }
+        .onAppear {
+            pairing.clearOperationError()
+            showsNicknameRecovery = !pairing.hasValidNickname
         }
     }
 
@@ -659,6 +678,31 @@ private struct InviteJoinFlowView: View {
     @ViewBuilder private var operationMessage: some View {
         if case .failed(let message) = pairing.state {
             Text(message).font(.caption).foregroundStyle(.red).padding(.top, 10)
+        }
+    }
+}
+
+private struct InviteNicknameField: View {
+    @ObservedObject var pairing: PairingStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("먼저 닉네임을 확인해 주세요")
+                .font(.system(size: 13, weight: .semibold))
+            TextField("닉네임", text: $pairing.nickname)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 14)
+                .frame(height: 48)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay { RoundedRectangle(cornerRadius: 8).stroke(AppTheme.divider) }
+                .onChange(of: pairing.nickname) { _, value in
+                    if value.count > 12 { pairing.nickname = String(value.prefix(12)) }
+                    pairing.clearOperationError()
+                }
+            Text("친구에게 표시되는 1~12자의 이름이에요.")
+                .font(.caption)
+                .foregroundStyle(AppTheme.secondaryText)
         }
     }
 }

@@ -1,3 +1,4 @@
+import FirebaseAuth
 import FirebaseFirestore
 import Foundation
 
@@ -58,7 +59,13 @@ final class PairingStore: ObservableObject {
     var isWorking: Bool { state == .working }
 
     var canPreviewInvite: Bool {
-        isValidInviteCode(normalizedInviteID(joinInviteID)) && !isPreviewingInvite
+        hasValidNickname
+            && isValidInviteCode(normalizedInviteID(joinInviteID))
+            && !isPreviewingInvite
+    }
+
+    var hasValidNickname: Bool {
+        (1...12).contains(nickname.trimmingCharacters(in: .whitespacesAndNewlines).count)
     }
 
     var currentPairID: String? {
@@ -74,6 +81,10 @@ final class PairingStore: ObservableObject {
         firstMetStatus == "pending"
             && firstMetProposedBy != nil
             && firstMetProposedBy != userID
+    }
+
+    func clearOperationError() {
+        if case .failed = state { state = .idle }
     }
 
     func loadLatestPair(userID: String) async {
@@ -228,28 +239,21 @@ final class PairingStore: ObservableObject {
 
         do {
             let previousInviteID = isValidInviteCode(inviteID) ? inviteID : nil
-            let pairID = try await makeUniqueInviteCode()
-            let pairReference = database.collection("pairs").document(pairID)
-            let batch = database.batch()
-
-            batch.setData([
-                "creatorId": userID,
-                "creatorNickname": nickname,
-                "memberIds": [userID],
-                "status": "waiting",
-                "expiresAt": Timestamp(date: Date().addingTimeInterval(24 * 60 * 60)),
-                "createdAt": FieldValue.serverTimestamp(),
-                "updatedAt": FieldValue.serverTimestamp()
-            ], forDocument: pairReference)
-
-            if let previousInviteID, previousInviteID != pairID {
-                batch.updateData([
-                    "status": "ended",
-                    "updatedAt": FieldValue.serverTimestamp()
-                ], forDocument: database.collection("pairs").document(previousInviteID))
+            let pairID: String
+            do {
+                pairID = try await createPairDocument(
+                    userID: userID,
+                    nickname: nickname,
+                    previousInviteID: previousInviteID
+                )
+            } catch {
+                guard isPermissionDenied(error), await refreshAuthenticationToken() else { throw error }
+                pairID = try await createPairDocument(
+                    userID: userID,
+                    nickname: nickname,
+                    previousInviteID: previousInviteID
+                )
             }
-
-            try await batch.commit()
 
             inviteID = pairID
             activePairID = nil
@@ -269,6 +273,7 @@ final class PairingStore: ObservableObject {
                     analysisStatus: "notStarted",
                     recordCount: 0
                 )
+                try? await self.saveProfileSilently(userID: userID, nickname: self.nickname)
             }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -323,7 +328,6 @@ final class PairingStore: ObservableObject {
         state = .working
 
         let pairReference = database.collection("pairs").document(pairID)
-        let memberReference = pairReference.collection("members").document(userID)
 
         do {
             let creatorID = try await database.runTransaction { transaction, errorPointer -> Any? in
@@ -358,13 +362,6 @@ final class PairingStore: ObservableObject {
                         "status": "active",
                         "updatedAt": FieldValue.serverTimestamp()
                     ], forDocument: pairReference)
-                    transaction.setData([
-                        "nickname": self.nickname,
-                        "analysisStatus": "notStarted",
-                        "recordCount": 0,
-                        "recordSchemaVersion": Self.recordSchemaVersion,
-                        "updatedAt": FieldValue.serverTimestamp()
-                    ], forDocument: memberReference)
 
                     return data["creatorId"] as? String
                 } catch {
@@ -381,6 +378,17 @@ final class PairingStore: ObservableObject {
             pairStatus = "친구와 연결됐어요."
             state = .succeeded(message: "친구와 연결됐어요.")
             listenToPair(documentID: pairID)
+            Task { [weak self] in
+                guard let self else { return }
+                try? await self.saveMember(
+                    pairID: pairID,
+                    userID: userID,
+                    nickname: self.nickname,
+                    analysisStatus: "notStarted",
+                    recordCount: 0
+                )
+                try? await self.saveProfileSilently(userID: userID, nickname: self.nickname)
+            }
             return true
         } catch {
             state = .failed(message: inviteAcceptanceMessage(for: error))
@@ -792,6 +800,19 @@ final class PairingStore: ObservableObject {
             ])
     }
 
+    private func saveProfileSilently(userID: String, nickname: String) async throws {
+        let reference = database.collection("users").document(userID)
+        let snapshot = try await reference.getDocument()
+        var data: [String: Any] = [
+            "nickname": nickname,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+        if !snapshot.exists {
+            data["createdAt"] = FieldValue.serverTimestamp()
+        }
+        try await reference.setData(data, merge: true)
+    }
+
     private func loadFriendSummaries(
         userID: String,
         pairs: [QueryDocumentSnapshot]
@@ -993,6 +1014,52 @@ final class PairingStore: ObservableObject {
             code: 1,
             userInfo: [NSLocalizedDescriptionKey: "새 초대 코드를 만들지 못했어요. 잠시 후 다시 시도해 주세요."]
         )
+    }
+
+    private func createPairDocument(
+        userID: String,
+        nickname: String,
+        previousInviteID: String?
+    ) async throws -> String {
+        let pairID = try await makeUniqueInviteCode()
+        let pairReference = database.collection("pairs").document(pairID)
+        let batch = database.batch()
+
+        batch.setData([
+            "creatorId": userID,
+            "creatorNickname": nickname,
+            "memberIds": [userID],
+            "status": "waiting",
+            "expiresAt": Timestamp(date: Date().addingTimeInterval(24 * 60 * 60)),
+            "createdAt": FieldValue.serverTimestamp(),
+            "updatedAt": FieldValue.serverTimestamp()
+        ], forDocument: pairReference)
+
+        if let previousInviteID, previousInviteID != pairID {
+            batch.updateData([
+                "status": "ended",
+                "updatedAt": FieldValue.serverTimestamp()
+            ], forDocument: database.collection("pairs").document(previousInviteID))
+        }
+
+        try await batch.commit()
+        return pairID
+    }
+
+    private func isPermissionDenied(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == FirestoreErrorDomain
+            && nsError.code == FirestoreErrorCode.permissionDenied.rawValue
+    }
+
+    private func refreshAuthenticationToken() async -> Bool {
+        guard let user = Auth.auth().currentUser else { return false }
+        do {
+            _ = try await user.getIDTokenResult(forcingRefresh: true)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func updateFriendSummary(
