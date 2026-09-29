@@ -212,7 +212,17 @@ final class PairingStore: ObservableObject {
         guard !isCreatingInvite else { return }
         isCreatingInvite = true
         defer { isCreatingInvite = false }
-        guard await saveProfile(userID: userID) else { return }
+
+        let trimmedNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedNickname.isEmpty else {
+            state = .failed(message: "닉네임을 입력해 주세요.")
+            return
+        }
+        guard trimmedNickname.count <= 12 else {
+            state = .failed(message: "닉네임은 12자 이하로 입력해 주세요.")
+            return
+        }
+        nickname = trimmedNickname
 
         state = .working
 
@@ -241,6 +251,13 @@ final class PairingStore: ObservableObject {
 
             try await batch.commit()
 
+            inviteID = pairID
+            activePairID = nil
+            creatorID = userID
+            pairStatus = "친구의 수락을 기다리고 있어요."
+            state = .succeeded(message: "초대 ID를 만들었어요.")
+            listenToPair(documentID: pairID)
+
             try await saveMember(
                 pairID: pairID,
                 userID: userID,
@@ -248,13 +265,6 @@ final class PairingStore: ObservableObject {
                 analysisStatus: "notStarted",
                 recordCount: 0
             )
-
-            inviteID = pairID
-            activePairID = nil
-            creatorID = userID
-            pairStatus = "친구의 수락을 기다리고 있어요."
-            state = .succeeded(message: "초대 ID를 만들었어요.")
-            listenToPair(documentID: pairID)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
