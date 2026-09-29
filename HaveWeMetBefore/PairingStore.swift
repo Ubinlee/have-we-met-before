@@ -315,47 +315,63 @@ final class PairingStore: ObservableObject {
         }
         isAcceptingInvite = true
         defer { isAcceptingInvite = false }
-        guard await saveProfile(userID: userID) else { return false }
         state = .working
 
         let pairReference = database.collection("pairs").document(pairID)
+        let memberReference = pairReference.collection("members").document(userID)
 
         do {
-            let snapshot = try await pairReference.getDocument()
-            guard snapshot.exists,
-                  let data = snapshot.data(),
-                  data["status"] as? String == "waiting",
-                  let memberIDs = data["memberIds"] as? [String],
-                  memberIDs.count == 1,
-                  !memberIDs.contains(userID) else {
-                state = .failed(message: "유효한 대기 중 초대가 아니에요.")
-                return false
+            let creatorID = try await database.runTransaction { transaction, errorPointer -> Any? in
+                do {
+                    let snapshot = try transaction.getDocument(pairReference)
+                    guard snapshot.exists,
+                          let data = snapshot.data(),
+                          data["status"] as? String == "waiting",
+                          let memberIDs = data["memberIds"] as? [String],
+                          memberIDs.count == 1,
+                          !memberIDs.contains(userID) else {
+                        errorPointer?.pointee = NSError(
+                            domain: "PairingStore",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "유효한 대기 중 초대가 아니에요."]
+                        )
+                        return nil
+                    }
+
+                    if let expiresAt = data["expiresAt"] as? Timestamp,
+                       expiresAt.dateValue() < Date() {
+                        errorPointer?.pointee = NSError(
+                            domain: "PairingStore",
+                            code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: "초대 코드가 만료됐어요."]
+                        )
+                        return nil
+                    }
+
+                    transaction.updateData([
+                        "memberIds": FieldValue.arrayUnion([userID]),
+                        "status": "active",
+                        "updatedAt": FieldValue.serverTimestamp()
+                    ], forDocument: pairReference)
+                    transaction.setData([
+                        "nickname": self.nickname,
+                        "analysisStatus": "notStarted",
+                        "recordCount": 0,
+                        "recordSchemaVersion": Self.recordSchemaVersion,
+                        "updatedAt": FieldValue.serverTimestamp()
+                    ], forDocument: memberReference)
+
+                    return data["creatorId"] as? String
+                } catch {
+                    errorPointer?.pointee = error as NSError
+                    return nil
+                }
             }
-
-            if let expiresAt = data["expiresAt"] as? Timestamp,
-               expiresAt.dateValue() < Date() {
-                state = .failed(message: "초대 코드가 만료됐어요.")
-                return false
-            }
-
-            try await pairReference.updateData([
-                "memberIds": FieldValue.arrayUnion([userID]),
-                "status": "active",
-                "updatedAt": FieldValue.serverTimestamp()
-            ])
-
-            try await saveMember(
-                pairID: pairID,
-                userID: userID,
-                nickname: nickname,
-                analysisStatus: "notStarted",
-                recordCount: 0
-            )
 
             inviteID = ""
             joinInviteID = ""
             activePairID = pairID
-            creatorID = data["creatorId"] as? String
+            self.creatorID = creatorID as? String
             connectedFriendNickname = inviteCreatorNickname
             pairStatus = "친구와 연결됐어요."
             state = .succeeded(message: "친구와 연결됐어요.")

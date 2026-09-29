@@ -631,7 +631,7 @@ private struct InviteJoinFlowView: View {
             .padding(.top, 32)
             operationMessage
             Spacer()
-            Button("연결하기") {
+            Button(pairing.isAcceptingInvite ? "연결 중..." : "연결하기") {
                 Task {
                     if await pairing.acceptPair(userID: userID) { stage = .date }
                 }
