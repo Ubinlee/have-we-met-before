@@ -9,7 +9,6 @@ struct ContentView: View {
     @EnvironmentObject private var firebaseSession: FirebaseSession
     @State private var onboardingStep: OnboardingStep = .start
     @State private var activeSheet: HomeSheet?
-    @State private var showLatestResult = false
     @State private var lastPreparedKey = ""
 
     var body: some View {
@@ -51,7 +50,6 @@ struct ContentView: View {
                         userID: userID,
                         onInvite: { activeSheet = .invite },
                         onJoin: { activeSheet = .join },
-                        onPairStatus: { activeSheet = .pair },
                         onSettings: { activeSheet = .settings },
                         onManage: { activeSheet = .manage }
                     )
@@ -60,44 +58,12 @@ struct ContentView: View {
                             await analyzer.scan()
                         }
                         await pairing.loadLatestPair(userID: userID)
-                        if pairing.currentPairID != nil,
-                           pairing.activePairID != nil,
-                           pairing.comparisonResult == nil {
-                            activeSheet = .pair
-                        }
                     }
                     .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")") {
                         await prepareAndCompareIfNeeded(userID: userID)
                     }
-                    .onChange(of: pairing.firstMetStatus) { _, _ in
-                        guard pairing.activePairID != nil else { return }
-                        activeSheet = .pair
-                    }
-                    .onChange(of: pairing.completedAnalysisCount) { _, count in
-                        if count > 0 {
-                            activeSheet = nil
-                            showLatestResult = true
-                        }
-                    }
                     .sheet(item: $activeSheet) { sheet in
                         sheetContent(sheet, userID: userID)
-                    }
-                    .fullScreenCover(isPresented: $showLatestResult) {
-                        if let result = pairing.comparisonResult {
-                            NavigationStack {
-                                ResultView(
-                                    result: result,
-                                    firstMetDate: pairing.savedFirstMetDate ?? pairing.firstMetDate,
-                                    firstNickname: pairing.nickname,
-                                    secondNickname: pairing.connectedFriendNickname
-                                )
-                                .toolbar {
-                                    ToolbarItem(placement: .topBarLeading) {
-                                        Button("닫기") { showLatestResult = false }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -111,11 +77,6 @@ struct ContentView: View {
             InviteCreateView(pairing: pairing, userID: userID)
         case .join:
             InviteJoinFlowView(pairing: pairing, userID: userID)
-        case .pair:
-            PairStatusFlowView(
-                pairing: pairing,
-                userID: userID
-            )
         case .settings:
             SettingsView(
                 nickname: pairing.nickname,
@@ -160,7 +121,7 @@ private enum OnboardingStep {
 }
 
 private enum HomeSheet: String, Identifiable {
-    case invite, join, pair, settings, manage
+    case invite, join, settings, manage
     var id: String { rawValue }
 }
 
@@ -448,7 +409,6 @@ private struct HomeView: View {
     let userID: String
     let onInvite: () -> Void
     let onJoin: () -> Void
-    let onPairStatus: () -> Void
     let onSettings: () -> Void
     let onManage: () -> Void
 
@@ -476,24 +436,6 @@ private struct HomeView: View {
             .foregroundStyle(AppTheme.primary)
             .padding(.top, -20)
 
-            if pairing.activePairID != nil,
-               !pairing.isFirstMetDateConfirmed,
-               pairing.comparisonResult == nil {
-                Button(action: onPairStatus) {
-                    HStack {
-                        Image(systemName: pairing.isFirstMetDateConfirmed ? "sparkles" : "calendar.badge.clock")
-                        Text(connectionStatusTitle)
-                            .font(.system(size: 13, weight: .bold))
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                    }
-                    .padding(16)
-                    .background(AppTheme.primarySoft)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-            }
-
             if pairing.friendSummaries.isEmpty {
                 InfoCard {
                     VStack(spacing: 12) {
@@ -510,19 +452,14 @@ private struct HomeView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(pairing.friendSummaries.enumerated()), id: \.element.id) { index, friend in
-                        let isAnalyzing = pairing.activePairID == friend.id
-                            && pairing.isFirstMetDateConfirmed
-                            && pairing.comparisonResult == nil
+                        let isAnalyzing = friend.firstMetStatus == "confirmed"
+                            && !friend.hasStoredResult
                         NavigationLink {
-                            if isAnalyzing {
-                                AnalysisProgressView(pairing: pairing)
-                            } else {
-                                FriendResultLoaderView(
-                                    pairing: pairing,
-                                    friend: friend,
-                                    userID: userID
-                                )
-                            }
+                            FriendDetailFlowView(
+                                pairing: pairing,
+                                friend: friend,
+                                userID: userID
+                            )
                         } label: {
                             FriendRankingRow(
                                 rank: index + 1,
@@ -566,15 +503,6 @@ private struct HomeView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(AppTheme.background.ignoresSafeArea())
         .navigationBarHidden(true)
-    }
-
-    private var connectionStatusTitle: String {
-        if pairing.isFirstMetDateConfirmed { return "결과를 분석중이에요" }
-        let nickname = pairing.connectedFriendNickname
-        guard let scalar = nickname.unicodeScalars.last else { return "친구와 연결됐어요" }
-        let hangulIndex = Int(scalar.value) - 0xAC00
-        let particle = (0...11_171).contains(hangulIndex) && hangulIndex % 28 != 0 ? "과" : "와"
-        return "\(nickname)\(particle) 연결됐어요"
     }
 
 }
@@ -712,54 +640,6 @@ private struct InviteJoinFlowView: View {
     }
 }
 
-private struct PairStatusFlowView: View {
-    @ObservedObject var pairing: PairingStore
-    let userID: String
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if pairing.activePairID == nil {
-                    StatusMessageView(
-                        title: "친구의 수락을 기다리고 있어요",
-                        message: "친구가 초대 코드를 입력하면 다음 단계로 넘어가요.",
-                        symbol: "person.2.badge.plus",
-                        buttonTitle: "확인",
-                        action: { dismiss() }
-                    )
-                } else if pairing.firstMetStatus == nil {
-                    FirstMetDateEntryView(pairing: pairing, userID: userID) { dismiss() }
-                } else if pairing.firstMetStatus == "pending" {
-                    if pairing.needsFirstMetDateConfirmation(userID: userID) {
-                        FirstMetDateConfirmationView(pairing: pairing, userID: userID)
-                    } else {
-                        StatusMessageView(
-                            title: "기준일 확인을\n기다리고 있어요",
-                            message: "\(pairing.connectedFriendNickname)님이 날짜를 확인하면 바로 분석을 시작해요.",
-                            symbol: "clock.badge.checkmark",
-                            buttonTitle: "확인",
-                            action: { dismiss() }
-                        )
-                    }
-                } else {
-                    if pairing.comparisonResult == nil {
-                        AnalysisProgressView(pairing: pairing, onBack: { dismiss() })
-                    } else {
-                        StatusMessageView(
-                            title: "분석 결과가 도착했어요",
-                            message: "홈의 친구 카드에서 결과를 확인할 수 있어요.",
-                            symbol: "checkmark.circle.fill",
-                            buttonTitle: "확인",
-                            action: { dismiss() }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 private struct FirstMetDateEntryView: View {
     @ObservedObject var pairing: PairingStore
     let userID: String
@@ -795,6 +675,7 @@ private struct FirstMetDateEntryView: View {
 private struct FirstMetDateConfirmationView: View {
     @ObservedObject var pairing: PairingStore
     let userID: String
+    var onBack: (() -> Void)?
     @State private var editing = false
 
     var body: some View {
@@ -804,7 +685,7 @@ private struct FirstMetDateConfirmationView: View {
             FlowScreen(
                 title: "\(pairing.connectedFriendNickname)님이 처음 알게 된\n날을 입력했어요",
                 message: "날짜가 맞으면 동의해 주세요. 동의하면 바로 분석을 시작해요.",
-                backAction: nil
+                backAction: onBack
             ) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("친구가 입력한 기준일")
@@ -901,27 +782,33 @@ private struct AnalysisProgressView: View {
             ZStack {
                 Circle()
                     .stroke(AppTheme.divider, lineWidth: 6)
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(
-                        AppTheme.primary,
-                        style: StrokeStyle(lineWidth: 6, lineCap: .round)
-                    )
-                    .rotationEffect(.degrees(-90))
-                    .animation(.easeInOut(duration: 0.35), value: progress)
-                Text("\(Int((progress * 100).rounded()))%")
-                    .font(.system(size: 36, weight: .regular))
-                    .monospacedDigit()
+                if pairing.isWaitingForRecords {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(AppTheme.primary)
+                } else {
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(
+                            AppTheme.primary,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeInOut(duration: 0.35), value: progress)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.system(size: 36, weight: .regular))
+                        .monospacedDigit()
+                }
             }
             .frame(width: 154, height: 154)
 
             VStack(spacing: 8) {
-                Text("사진 기록을 살펴보고 있어요")
+                Text(pairing.isWaitingForRecords ? "기록 준비를 기다리고 있어요" : "사진 기록을 살펴보고 있어요")
                     .font(.system(size: 18, weight: .bold))
-                Text("사진에 남은 시간과 위치 정보를 확인하고 있어요.")
+                Text(pairing.analysisMessage)
                     .font(.system(size: 13))
                     .foregroundStyle(AppTheme.secondaryText)
-                Text("앱을 닫아도 분석은 계속돼요.")
+                Text("두 사람의 준비가 끝나면 자동으로 이어서 분석해요.")
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.primary)
             }
@@ -947,14 +834,18 @@ private struct AnalysisProgressView: View {
     }
 }
 
-private struct FriendResultLoaderView: View {
+private struct FriendDetailFlowView: View {
     @ObservedObject var pairing: PairingStore
     let friend: FriendConnectionSummary
     let userID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var didLoad = false
 
     var body: some View {
         Group {
-            if let result = pairing.comparisonResult, pairing.activePairID == friend.id {
+            if !didLoad {
+                ProgressView()
+            } else if let result = pairing.comparisonResult, pairing.activePairID == friend.id {
                 ResultView(
                     result: result,
                     firstMetDate: pairing.savedFirstMetDate ?? friend.firstMetDate ?? Date(),
@@ -963,14 +854,39 @@ private struct FriendResultLoaderView: View {
                 )
             } else if case .failed(let message) = pairing.state {
                 FlowErrorView(title: "결과를 열 수 없어요", message: message, primaryTitle: "다시 시도하기") {
-                    Task { await pairing.openPair(pairID: friend.id, userID: userID) }
+                    Task {
+                        didLoad = false
+                        await pairing.openPair(pairID: friend.id, userID: userID)
+                        didLoad = true
+                    }
                 }
+            } else if pairing.firstMetStatus == nil {
+                FirstMetDateEntryView(pairing: pairing, userID: userID) { dismiss() }
+            } else if pairing.firstMetStatus == "pending" {
+                if pairing.needsFirstMetDateConfirmation(userID: userID) {
+                    FirstMetDateConfirmationView(
+                        pairing: pairing,
+                        userID: userID,
+                        onBack: { dismiss() }
+                    )
+                } else {
+                    StatusMessageView(
+                        title: "기준일 확인을\n기다리고 있어요",
+                        message: "\(pairing.connectedFriendNickname)님이 날짜를 확인하면 바로 분석을 시작해요.",
+                        symbol: "clock.badge.checkmark",
+                        buttonTitle: "홈으로 돌아가기",
+                        action: { dismiss() }
+                    )
+                }
+            } else if pairing.isFirstMetDateConfirmed {
+                AnalysisProgressView(pairing: pairing)
             } else {
                 ProgressView()
             }
         }
         .task(id: friend.id) {
             await pairing.openPair(pairID: friend.id, userID: userID)
+            didLoad = true
         }
     }
 }

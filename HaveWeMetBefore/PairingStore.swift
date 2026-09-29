@@ -8,6 +8,8 @@ struct FriendConnectionSummary: Identifiable, Sendable {
     let intersectionDayCount: Int
     let closestStrength: IntersectionStrength?
     let firstMetDate: Date?
+    let firstMetStatus: String?
+    let hasStoredResult: Bool
     let isReady: Bool
 }
 
@@ -34,6 +36,8 @@ final class PairingStore: ObservableObject {
     @Published private(set) var uploadedRecordCount = 0
     @Published private(set) var comparisonResult: DestinyScoreResult?
     @Published private(set) var analysisProgress = 0.0
+    @Published private(set) var isWaitingForRecords = false
+    @Published private(set) var analysisMessage = "사진에 남은 시간과 위치 정보를 확인하고 있어요."
     @Published private(set) var completedAnalysisCount = 0
     @Published private(set) var friendSummaries: [FriendConnectionSummary] = []
     @Published private(set) var state: OperationState = .idle
@@ -86,8 +90,15 @@ final class PairingStore: ObservableObject {
                 pairs: snapshot.documents
             )
 
-            let availablePairs = snapshot.documents.filter {
-                ($0.data()["status"] as? String) != "ended"
+            let availablePairs = snapshot.documents.filter { pair in
+                switch pair.data()["status"] as? String {
+                case "active":
+                    return true
+                case "waiting":
+                    return isValidInviteCode(pair.documentID)
+                default:
+                    return false
+                }
             }
 
             guard let pair = availablePairs.max(by: {
@@ -98,6 +109,10 @@ final class PairingStore: ObservableObject {
                 inviteID = ""
                 joinInviteID = ""
                 pairStatus = nil
+                pairListener?.remove()
+                pairListener = nil
+                membersListener?.remove()
+                membersListener = nil
                 return
             }
 
@@ -122,7 +137,9 @@ final class PairingStore: ObservableObject {
             applyPair(documentID: snapshot.documentID, data: data)
             listenToPair(documentID: snapshot.documentID)
             if await loadStoredResult(pairID: snapshot.documentID) { return }
-            if isFirstMetDateConfirmed { await compareWithFriend(userID: userID) }
+            if isFirstMetDateConfirmed {
+                analysisMessage = "두 사람의 기록 상태를 확인하고 있어요."
+            }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -223,7 +240,7 @@ final class PairingStore: ObservableObject {
 
     func previewInvite(userID: String) async -> Bool {
         let pairID = normalizedInviteID(joinInviteID)
-        guard pairID.count == 6 else {
+        guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
@@ -256,7 +273,7 @@ final class PairingStore: ObservableObject {
 
     func acceptPair(userID: String) async -> Bool {
         let pairID = normalizedInviteID(joinInviteID)
-        guard pairID.count == 6 else {
+        guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
@@ -389,6 +406,8 @@ final class PairingStore: ObservableObject {
         )
         state = .working
         analysisProgress = max(analysisProgress, 0.18)
+        isWaitingForRecords = false
+        analysisMessage = "내 사진 기록을 분석용 데이터로 준비하고 있어요."
 
         do {
             try await saveMember(
@@ -412,6 +431,7 @@ final class PairingStore: ObservableObject {
 
             uploadedRecordCount = records.count
             analysisProgress = max(analysisProgress, 0.68)
+            analysisMessage = "친구의 기록 준비 상태를 확인하고 있어요."
             state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -424,6 +444,7 @@ final class PairingStore: ObservableObject {
             return
         }
         analysisProgress = max(analysisProgress, 0.72)
+        analysisMessage = "두 사람의 기록 상태를 확인하고 있어요."
         await compareWithFriend(userID: userID)
     }
 
@@ -434,7 +455,8 @@ final class PairingStore: ObservableObject {
         }
 
         state = .working
-        analysisProgress = max(analysisProgress, 0.76)
+        isWaitingForRecords = false
+        analysisMessage = "두 사람의 기록 상태를 확인하고 있어요."
 
         do {
             let pairSnapshot = try await database
@@ -481,6 +503,8 @@ final class PairingStore: ObservableObject {
             guard memberIsReady(
                 ownMemberSnapshot.data()
             ) else {
+                isWaitingForRecords = true
+                analysisMessage = "내 사진 기록을 준비하고 있어요."
                 state = .succeeded(message: "내 기록을 자동으로 준비하고 있어요. 잠시 후 다시 시도해 주세요.")
                 return
             }
@@ -488,10 +512,15 @@ final class PairingStore: ObservableObject {
             guard memberIsReady(
                 friendMemberSnapshot.data()
             ) else {
+                isWaitingForRecords = true
+                analysisMessage = "\(connectedFriendNickname)님의 기록 준비를 기다리고 있어요."
                 state = .succeeded(message: "친구의 기록 준비가 아직 끝나지 않았어요.")
                 return
             }
 
+            isWaitingForRecords = false
+            analysisProgress = max(analysisProgress, 0.82)
+            analysisMessage = "두 사람의 시간과 위치 기록을 비교하고 있어요."
             async let ownSnapshot = visitsCollection(pairID: pairID, userID: userID)
                 .getDocuments()
             async let friendSnapshot = visitsCollection(pairID: pairID, userID: friendID)
@@ -525,6 +554,8 @@ final class PairingStore: ObservableObject {
             comparisonResult = result
             resultCache[pairID] = result
             analysisProgress = 1
+            analysisMessage = "분석이 완료됐어요."
+            updateFriendSummary(pairID: pairID, result: result, firstMetDate: cutoffDate)
             completedAnalysisCount += 1
             state = .succeeded(
                 message: intersections.isEmpty
@@ -614,6 +645,8 @@ final class PairingStore: ObservableObject {
         if let cached = resultCache[pairID] {
             comparisonResult = cached
             analysisProgress = 1
+            isWaitingForRecords = false
+            analysisMessage = "분석이 완료됐어요."
             state = .succeeded(message: "저장된 분석 결과를 열었어요.")
             return true
         }
@@ -642,6 +675,8 @@ final class PairingStore: ObservableObject {
             resultCache[pairID] = result
             comparisonResult = result
             analysisProgress = 1
+            isWaitingForRecords = false
+            analysisMessage = "분석이 완료됐어요."
             state = .succeeded(message: "저장된 분석 결과를 열었어요.")
             return true
         } catch {
@@ -720,16 +755,20 @@ final class PairingStore: ObservableObject {
                 let (memberSnapshot, resultSnapshot) = try await (member, result)
                 let memberData = memberSnapshot.data()
                 let resultData = resultSnapshot.data()
-                let rawStrength = integer(from: resultData?["closestLevel"])
+                let hasStoredResult = integer(from: resultData?["schemaVersion"]) == Self.recordSchemaVersion
+                let rawStrength = hasStoredResult ? integer(from: resultData?["closestLevel"]) : nil
 
                 summaries.append(
                     FriendConnectionSummary(
                         id: pair.documentID,
                         nickname: memberData?["nickname"] as? String ?? "친구",
-                        score: integer(from: resultData?["score"]),
-                        intersectionDayCount: integer(from: resultData?["intersectionDayCount"]) ?? 0,
+                        score: hasStoredResult ? integer(from: resultData?["score"]) : nil,
+                        intersectionDayCount: hasStoredResult ? integer(from: resultData?["intersectionDayCount"]) ?? 0 : 0,
                         closestStrength: rawStrength.flatMap(IntersectionStrength.init(rawValue:)),
                         firstMetDate: (data["firstMetAt"] as? Timestamp)?.dateValue(),
+                        firstMetStatus: data["firstMetStatus"] as? String
+                            ?? ((data["firstMetAt"] as? Timestamp) == nil ? nil : "confirmed"),
+                        hasStoredResult: hasStoredResult,
                         isReady: memberIsReady(memberData)
                     )
                 )
@@ -795,8 +834,8 @@ final class PairingStore: ObservableObject {
             }
         case "waiting":
             activePairID = nil
-            inviteID = documentID
-            pairStatus = "친구의 수락을 기다리고 있어요."
+            inviteID = isValidInviteCode(documentID) ? documentID : ""
+            pairStatus = inviteID.isEmpty ? nil : "친구의 수락을 기다리고 있어요."
             membersListener?.remove()
             membersListener = nil
         default:
@@ -870,13 +909,46 @@ final class PairingStore: ObservableObject {
     }
 
     private func normalizedInviteID(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.contains("-") ? trimmed.lowercased() : trimmed.uppercased()
+        value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    private func isValidInviteCode(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return value.count == 6
+            && value.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     private func makeInviteCode() -> String {
         let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         return String((0..<6).compactMap { _ in alphabet.randomElement() })
+    }
+
+    private func updateFriendSummary(
+        pairID: String,
+        result: DestinyScoreResult,
+        firstMetDate: Date
+    ) {
+        guard let index = friendSummaries.firstIndex(where: { $0.id == pairID }) else { return }
+        let previous = friendSummaries[index]
+        friendSummaries[index] = FriendConnectionSummary(
+            id: previous.id,
+            nickname: previous.nickname,
+            score: result.score,
+            intersectionDayCount: result.totalIntersectionDayCount,
+            closestStrength: result.closestIntersection?.strength,
+            firstMetDate: firstMetDate,
+            firstMetStatus: "confirmed",
+            hasStoredResult: true,
+            isReady: true
+        )
+        friendSummaries.sort {
+            switch ($0.score, $1.score) {
+            case let (left?, right?): left > right
+            case (_?, nil): true
+            case (nil, _?): false
+            case (nil, nil): $0.nickname < $1.nickname
+            }
+        }
     }
 
     private func creatorErrorMessage(data: [String: Any], userID: String) -> String {
