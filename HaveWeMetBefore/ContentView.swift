@@ -537,7 +537,10 @@ private struct InviteCreateView: View {
                     Button {
                         Task { await pairing.createPair(userID: userID) }
                     } label: {
-                        Label("새 코드 만들기", systemImage: "arrow.clockwise")
+                        Label(
+                            pairing.isCreatingInvite ? "새 코드 만드는 중..." : "새 코드 만들기",
+                            systemImage: "arrow.clockwise"
+                        )
                     }
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.primary)
@@ -548,7 +551,9 @@ private struct InviteCreateView: View {
                 }
                 Spacer()
                 if pairing.inviteID.isEmpty {
-                    Button("초대 코드 만들기") { Task { await pairing.createPair(userID: userID) } }
+                    Button(pairing.isCreatingInvite ? "초대 코드 만드는 중..." : "초대 코드 만들기") {
+                        Task { await pairing.createPair(userID: userID) }
+                    }
                         .buttonStyle(PrimaryActionButtonStyle())
                         .disabled(pairing.isCreatingInvite)
                         .opacity(pairing.isCreatingInvite ? 0.6 : 1)

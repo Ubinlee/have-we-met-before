@@ -258,13 +258,18 @@ final class PairingStore: ObservableObject {
             state = .succeeded(message: "초대 ID를 만들었어요.")
             listenToPair(documentID: pairID)
 
-            try await saveMember(
-                pairID: pairID,
-                userID: userID,
-                nickname: nickname,
-                analysisStatus: "notStarted",
-                recordCount: 0
-            )
+            // The invite is ready as soon as the pair document is committed.
+            // Preparing the creator's member record must not keep the button disabled.
+            Task { [weak self] in
+                guard let self else { return }
+                try? await self.saveMember(
+                    pairID: pairID,
+                    userID: userID,
+                    nickname: self.nickname,
+                    analysisStatus: "notStarted",
+                    recordCount: 0
+                )
+            }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
