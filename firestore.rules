@@ -1,0 +1,332 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function pairDocument(pairId) {
+      return get(/databases/$(database)/documents/pairs/$(pairId));
+    }
+
+    function isPairMember(pairId) {
+      return signedIn()
+        && request.auth.uid in pairDocument(pairId).data.memberIds;
+    }
+
+    function validUserProfile(data) {
+      return data.keys().hasAll(['nickname', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['nickname', 'createdAt', 'updatedAt'])
+        && data.nickname is string
+        && data.nickname.size() > 0
+        && data.nickname.size() <= 20
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function validPair(data) {
+      return data.keys().hasAll([
+          'creatorId',
+          'memberIds',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'creatorId',
+          'creatorNickname',
+          'memberIds',
+          'status',
+          'expiresAt',
+          'firstMetAt',
+          'firstMetStatus',
+          'firstMetProposedBy',
+          'firstMetConfirmedBy',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.creatorId is string
+        && (!('creatorNickname' in data)
+          || (data.creatorNickname is string
+            && data.creatorNickname.size() > 0
+            && data.creatorNickname.size() <= 12))
+        && (!('expiresAt' in data) || data.expiresAt is timestamp)
+        && data.memberIds is list
+        && data.memberIds.size() >= 1
+        && data.memberIds.size() <= 2
+        && data.status in ['waiting', 'active', 'ended']
+        && (!('firstMetAt' in data) || data.firstMetAt is timestamp)
+        && (!('firstMetStatus' in data)
+          || data.firstMetStatus in ['pending', 'confirmed'])
+        && (!('firstMetProposedBy' in data)
+          || data.firstMetProposedBy in data.memberIds)
+        && (!('firstMetConfirmedBy' in data)
+          || (data.firstMetConfirmedBy is list
+            && data.firstMetConfirmedBy.size() >= 1
+            && data.firstMetConfirmedBy.size() <= 2))
+        && (!('firstMetStatus' in data)
+          || (('firstMetAt' in data)
+            && ('firstMetProposedBy' in data)
+            && ('firstMetConfirmedBy' in data)
+            && data.firstMetConfirmedBy.hasAll([data.firstMetProposedBy])
+            && (data.firstMetStatus == 'pending'
+              || data.firstMetConfirmedBy.hasAll(data.memberIds))))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isInviteAcceptance() {
+      return signedIn()
+        && resource.data.status == 'waiting'
+        && resource.data.memberIds.size() == 1
+        && !(request.auth.uid in resource.data.memberIds)
+        && request.resource.data.status == 'active'
+        && request.resource.data.memberIds.size() == 2
+        && request.resource.data.memberIds.hasAll(resource.data.memberIds)
+        && request.resource.data.memberIds.hasAll([request.auth.uid])
+        && request.resource.data.creatorId == resource.data.creatorId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['memberIds', 'status', 'updatedAt'])
+        && validPair(request.resource.data);
+    }
+
+    function isMemberPairUpdate(pairId) {
+      return isPairMember(pairId)
+        && request.resource.data.creatorId == resource.data.creatorId
+        && request.resource.data.memberIds == resource.data.memberIds
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly([
+            'status',
+            'firstMetAt',
+            'firstMetStatus',
+            'firstMetProposedBy',
+            'firstMetConfirmedBy',
+            'updatedAt'
+          ])
+        && validPair(request.resource.data);
+    }
+
+    function validPairMember(data) {
+      return data.keys().hasAll([
+          'nickname',
+          'analysisStatus',
+          'recordCount',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'nickname',
+          'analysisStatus',
+          'recordCount',
+          'recordSchemaVersion',
+          'updatedAt'
+        ])
+        && data.nickname is string
+        && data.nickname.size() > 0
+        && data.nickname.size() <= 20
+        && data.analysisStatus in ['notStarted', 'analyzing', 'ready', 'failed']
+        && data.recordCount is int
+        && data.recordCount >= 0
+        && (!('recordSchemaVersion' in data)
+          || data.recordSchemaVersion in [1, 2])
+        && data.updatedAt is timestamp;
+    }
+
+    function validSharedVisit(data) {
+      return data.keys().hasAll([
+          'timeBucketIndex',
+          'latitudeCell',
+          'longitudeCell',
+          'schemaVersion'
+        ])
+        && data.keys().hasOnly([
+          'timeBucketIndex',
+          'latitudeCell',
+          'longitudeCell',
+          'schemaVersion'
+        ])
+        && data.timeBucketIndex is int
+        && data.timeBucketIndex >= 0
+        && data.latitudeCell is int
+        && data.latitudeCell >= -9000
+        && data.latitudeCell <= 9000
+        && data.longitudeCell is int
+        && data.longitudeCell >= -18000
+        && data.longitudeCell <= 18000
+        && data.schemaVersion in [1, 2];
+    }
+
+    function validMatchResult(data) {
+      return data.keys().hasAll([
+          'score',
+          'intersectionDayCount',
+          'rankedIntersections',
+          'generatedBy',
+          'createdAt',
+          'schemaVersion'
+        ])
+        && data.keys().hasOnly([
+          'score',
+          'intersectionDayCount',
+          'closestLevel',
+          'closestTimeBucketIndex',
+          'closestLatitudeCell',
+          'closestLongitudeCell',
+          'rankedIntersections',
+          'generatedBy',
+          'createdAt',
+          'schemaVersion'
+        ])
+        && data.score is int
+        && data.score >= 0
+        && data.score <= 100
+        && data.intersectionDayCount is int
+        && data.intersectionDayCount >= 0
+        && data.rankedIntersections is list
+        && data.rankedIntersections.size() <= 3
+        && (data.rankedIntersections.size() < 1
+          || validStoredIntersection(data.rankedIntersections[0]))
+        && (data.rankedIntersections.size() < 2
+          || validStoredIntersection(data.rankedIntersections[1]))
+        && (data.rankedIntersections.size() < 3
+          || validStoredIntersection(data.rankedIntersections[2]))
+        && (!('closestLevel' in data)
+          || data.closestLevel in [1, 2, 3])
+        && (!('closestTimeBucketIndex' in data)
+          || data.closestTimeBucketIndex is int)
+        && (!('closestLatitudeCell' in data)
+          || data.closestLatitudeCell is int)
+        && (!('closestLongitudeCell' in data)
+          || data.closestLongitudeCell is int)
+        && data.generatedBy == request.auth.uid
+        && data.createdAt is timestamp
+        && data.schemaVersion in [1, 2];
+    }
+
+    function validStoredIntersection(data) {
+      return data.keys().hasAll([
+          'id',
+          'firstRecordID',
+          'secondRecordID',
+          'firstCapturedAt',
+          'secondCapturedAt',
+          'strength',
+          'distanceMeters',
+          'timeDifference',
+          'approximateLatitude',
+          'approximateLongitude'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'firstRecordID',
+          'secondRecordID',
+          'firstCapturedAt',
+          'secondCapturedAt',
+          'strength',
+          'distanceMeters',
+          'timeDifference',
+          'approximateLatitude',
+          'approximateLongitude'
+        ])
+        && data.id is string
+        && data.firstRecordID is string
+        && data.secondRecordID is string
+        && data.firstCapturedAt is timestamp
+        && data.secondCapturedAt is timestamp
+        && data.strength in [1, 2, 3]
+        && data.distanceMeters is number
+        && data.distanceMeters >= 0
+        && data.timeDifference is number
+        && data.timeDifference >= 0
+        && data.approximateLatitude is number
+        && data.approximateLatitude >= -90
+        && data.approximateLatitude <= 90
+        && data.approximateLongitude is number
+        && data.approximateLongitude >= -180
+        && data.approximateLongitude <= 180;
+    }
+
+    match /users/{userId} {
+      allow create: if isOwner(userId)
+        && validUserProfile(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow read, delete: if isOwner(userId);
+
+      allow update: if isOwner(userId)
+        && validUserProfile(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['nickname', 'updatedAt']);
+    }
+
+    match /pairs/{pairId} {
+      allow get: if signedIn()
+        && (request.auth.uid in resource.data.memberIds
+          || resource.data.status == 'waiting');
+
+      allow list: if signedIn()
+        && request.auth.uid in resource.data.memberIds;
+
+      allow create: if signedIn()
+        && validPair(request.resource.data)
+        && request.resource.data.creatorId == request.auth.uid
+        && request.resource.data.memberIds == [request.auth.uid]
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isInviteAcceptance()
+        || isMemberPairUpdate(pairId);
+
+      allow delete: if false;
+
+      match /members/{userId} {
+        allow read: if isPairMember(pairId);
+
+        allow create, update: if isPairMember(pairId)
+          && isOwner(userId)
+          && validPairMember(request.resource.data)
+          && request.resource.data.updatedAt == request.time;
+
+        allow delete: if isPairMember(pairId) && isOwner(userId);
+
+        match /visits/{visitId} {
+          allow read: if isPairMember(pairId);
+
+          allow create, update: if isPairMember(pairId)
+            && isOwner(userId)
+            && visitId.matches('^[0-9a-f]{64}$')
+            && validSharedVisit(request.resource.data);
+
+          allow delete: if isPairMember(pairId) && isOwner(userId);
+        }
+      }
+
+      match /results/{resultId} {
+        allow read: if isPairMember(pairId);
+
+        allow create, update: if isPairMember(pairId)
+          && resultId == 'current'
+          && validMatchResult(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+
+        allow delete: if isPairMember(pairId);
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
