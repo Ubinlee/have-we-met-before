@@ -44,6 +44,9 @@ final class PairingStore: ObservableObject {
     @Published private(set) var creatorID: String?
     @Published private(set) var connectedFriendNickname = "친구"
     @Published private(set) var inviteCreatorNickname = "친구"
+    @Published private(set) var isCreatingInvite = false
+    @Published private(set) var isPreviewingInvite = false
+    @Published private(set) var isAcceptingInvite = false
 
     private let database = Firestore.firestore()
     private var pairListener: ListenerRegistration?
@@ -53,6 +56,10 @@ final class PairingStore: ObservableObject {
     private var resultCache: [String: DestinyScoreResult] = [:]
 
     var isWorking: Bool { state == .working }
+
+    var canPreviewInvite: Bool {
+        isValidInviteCode(normalizedInviteID(joinInviteID)) && !isPreviewingInvite
+    }
 
     var currentPairID: String? {
         activePairID ?? (inviteID.isEmpty ? nil : inviteID)
@@ -202,14 +209,20 @@ final class PairingStore: ObservableObject {
     }
 
     func createPair(userID: String) async {
+        guard !isCreatingInvite else { return }
+        isCreatingInvite = true
+        defer { isCreatingInvite = false }
         guard await saveProfile(userID: userID) else { return }
 
         state = .working
-        let pairID = makeInviteCode()
-        let pairReference = database.collection("pairs").document(pairID)
 
         do {
-            try await pairReference.setData([
+            let previousInviteID = isValidInviteCode(inviteID) ? inviteID : nil
+            let pairID = try await makeUniqueInviteCode()
+            let pairReference = database.collection("pairs").document(pairID)
+            let batch = database.batch()
+
+            batch.setData([
                 "creatorId": userID,
                 "creatorNickname": nickname,
                 "memberIds": [userID],
@@ -217,7 +230,16 @@ final class PairingStore: ObservableObject {
                 "expiresAt": Timestamp(date: Date().addingTimeInterval(24 * 60 * 60)),
                 "createdAt": FieldValue.serverTimestamp(),
                 "updatedAt": FieldValue.serverTimestamp()
-            ])
+            ], forDocument: pairReference)
+
+            if let previousInviteID, previousInviteID != pairID {
+                batch.updateData([
+                    "status": "ended",
+                    "updatedAt": FieldValue.serverTimestamp()
+                ], forDocument: database.collection("pairs").document(previousInviteID))
+            }
+
+            try await batch.commit()
 
             try await saveMember(
                 pairID: pairID,
@@ -239,11 +261,14 @@ final class PairingStore: ObservableObject {
     }
 
     func previewInvite(userID: String) async -> Bool {
+        guard !isPreviewingInvite else { return false }
         let pairID = normalizedInviteID(joinInviteID)
         guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
+        isPreviewingInvite = true
+        defer { isPreviewingInvite = false }
         state = .working
         do {
             let snapshot = try await database.collection("pairs").document(pairID).getDocument()
@@ -272,11 +297,14 @@ final class PairingStore: ObservableObject {
     }
 
     func acceptPair(userID: String) async -> Bool {
+        guard !isAcceptingInvite else { return false }
         let pairID = normalizedInviteID(joinInviteID)
         guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
+        isAcceptingInvite = true
+        defer { isAcceptingInvite = false }
         guard await saveProfile(userID: userID) else { return false }
         state = .working
 
@@ -921,6 +949,19 @@ final class PairingStore: ObservableObject {
     private func makeInviteCode() -> String {
         let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         return String((0..<6).compactMap { _ in alphabet.randomElement() })
+    }
+
+    private func makeUniqueInviteCode() async throws -> String {
+        for _ in 0..<8 {
+            let candidate = makeInviteCode()
+            let snapshot = try await database.collection("pairs").document(candidate).getDocument()
+            if !snapshot.exists { return candidate }
+        }
+        throw NSError(
+            domain: "InviteCode",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "새 초대 코드를 만들지 못했어요. 잠시 후 다시 시도해 주세요."]
+        )
     }
 
     private func updateFriendSummary(

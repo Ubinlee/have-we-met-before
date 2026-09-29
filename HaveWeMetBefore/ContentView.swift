@@ -533,11 +533,25 @@ private struct InviteCreateView: View {
                         }
                     }
                     .padding(.top, 32)
+
+                    Button {
+                        Task { await pairing.createPair(userID: userID) }
+                    } label: {
+                        Label("새 코드 만들기", systemImage: "arrow.clockwise")
+                    }
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 14)
+                    .disabled(pairing.isCreatingInvite)
+                    .opacity(pairing.isCreatingInvite ? 0.6 : 1)
                 }
                 Spacer()
                 if pairing.inviteID.isEmpty {
                     Button("초대 코드 만들기") { Task { await pairing.createPair(userID: userID) } }
                         .buttonStyle(PrimaryActionButtonStyle())
+                        .disabled(pairing.isCreatingInvite)
+                        .opacity(pairing.isCreatingInvite ? 0.6 : 1)
                 } else {
                     ShareLink(item: "본 적 있나? 초대 코드: \(pairing.inviteID)") {
                         Text("초대 메시지 공유")
@@ -595,7 +609,8 @@ private struct InviteJoinFlowView: View {
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
-            .disabled(pairing.joinInviteID.count != 6 || pairing.isWorking)
+            .disabled(!pairing.canPreviewInvite)
+            .opacity(pairing.canPreviewInvite ? 1 : 0.35)
         }
     }
 
@@ -614,6 +629,7 @@ private struct InviteJoinFlowView: View {
                 .font(.system(size: 13))
             }
             .padding(.top, 32)
+            operationMessage
             Spacer()
             Button("연결하기") {
                 Task {
@@ -621,6 +637,8 @@ private struct InviteJoinFlowView: View {
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
+            .disabled(pairing.isAcceptingInvite)
+            .opacity(pairing.isAcceptingInvite ? 0.6 : 1)
             Button("연결하지 않기") { dismiss() }
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(AppTheme.secondaryText)

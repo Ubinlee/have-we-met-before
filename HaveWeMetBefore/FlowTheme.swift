@@ -56,7 +56,6 @@ struct FlowScreen<Content: View>: View {
             }
 
             content
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, 24)
         .padding(.top, 24)
