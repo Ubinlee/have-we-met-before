@@ -53,6 +53,8 @@ final class PairingStore: ObservableObject {
     private var pairListener: ListenerRegistration?
     private var membersListener: ListenerRegistration?
     private var currentUserID: String?
+    /// 서버(users/{uid})에 마지막으로 저장된 닉네임. 닉네임이 바뀌었는지 판단할 때 사용합니다.
+    private var savedProfileNickname: String?
     private var analysisInFlight = false
     private var resultCache: [String: DestinyScoreResult] = [:]
 
@@ -96,6 +98,7 @@ final class PairingStore: ObservableObject {
                 .getDocument()
             if let savedNickname = profile.data()?["nickname"] as? String {
                 nickname = savedNickname
+                savedProfileNickname = savedNickname
             }
 
             let snapshot = try await database
@@ -108,12 +111,17 @@ final class PairingStore: ObservableObject {
                 pairs: snapshot.documents
             )
 
+            // 만료됐거나 내가 만들지 않은 대기 초대는 다시 불러오지 않습니다.
+            // (예전에는 만료된 옛 코드가 계속 화면에 남아 친구가 입력해도 연결되지 않았습니다.)
             let availablePairs = snapshot.documents.filter { pair in
-                switch pair.data()["status"] as? String {
+                let data = pair.data()
+                switch data["status"] as? String {
                 case "active":
                     return true
                 case "waiting":
                     return isValidInviteCode(pair.documentID)
+                        && data["creatorId"] as? String == userID
+                        && !isExpired(data)
                 default:
                     return false
                 }
@@ -145,6 +153,7 @@ final class PairingStore: ObservableObject {
     func openPair(pairID: String, userID: String) async {
         currentUserID = userID
         comparisonResult = nil
+        connectedFriendNickname = friendSummaries.first(where: { $0.id == pairID })?.nickname ?? "친구"
         state = .working
         do {
             let snapshot = try await database.collection("pairs").document(pairID).getDocument()
@@ -197,19 +206,9 @@ final class PairingStore: ObservableObject {
         }
 
         state = .working
-        let reference = database.collection("users").document(userID)
 
         do {
-            let snapshot = try await reference.getDocument()
-            var data: [String: Any] = [
-                "nickname": trimmedNickname,
-                "updatedAt": FieldValue.serverTimestamp()
-            ]
-            if !snapshot.exists {
-                data["createdAt"] = FieldValue.serverTimestamp()
-            }
-
-            try await reference.setData(data, merge: true)
+            try await saveProfileSilently(userID: userID, nickname: trimmedNickname)
             nickname = trimmedNickname
             state = .succeeded(message: "프로필을 저장했어요.")
             return true
@@ -221,6 +220,7 @@ final class PairingStore: ObservableObject {
 
     func createPair(userID: String) async {
         guard !isCreatingInvite else { return }
+        currentUserID = userID
         isCreatingInvite = true
         defer { isCreatingInvite = false }
 
@@ -234,46 +234,43 @@ final class PairingStore: ObservableObject {
             return
         }
         nickname = trimmedNickname
-
         state = .working
 
+        let previousInviteID = isValidInviteCode(inviteID) ? inviteID : nil
+
         do {
-            let previousInviteID = isValidInviteCode(inviteID) ? inviteID : nil
+            // 닉네임을 먼저 저장합니다. 닉네임이 바뀌었다면 옛 닉네임이 적힌 초대가 여기서 정리되고,
+            // 아래에서 새 닉네임으로 초대를 만듭니다.
+            try? await saveProfileSilently(userID: userID, nickname: trimmedNickname)
+
             let pairID: String
             do {
-                pairID = try await createPairDocument(
-                    userID: userID,
-                    nickname: nickname,
-                    previousInviteID: previousInviteID
-                )
+                pairID = try await createPairDocument(userID: userID, nickname: trimmedNickname)
             } catch {
                 guard isPermissionDenied(error), await refreshAuthenticationToken() else { throw error }
-                pairID = try await createPairDocument(
-                    userID: userID,
-                    nickname: nickname,
-                    previousInviteID: previousInviteID
-                )
+                pairID = try await createPairDocument(userID: userID, nickname: trimmedNickname)
             }
 
             inviteID = pairID
             activePairID = nil
             creatorID = userID
             pairStatus = "친구의 수락을 기다리고 있어요."
-            state = .succeeded(message: "초대 ID를 만들었어요.")
+            state = .succeeded(message: "새 초대 코드를 만들었어요.")
             listenToPair(documentID: pairID)
 
-            // The invite is ready as soon as the pair document is committed.
-            // Preparing the creator's member record must not keep the button disabled.
+            // 예전 초대 정리와 내 멤버 문서 준비는 새 코드 표시를 막지 않도록 뒤에서 처리합니다.
             Task { [weak self] in
                 guard let self else { return }
+                if let previousInviteID, previousInviteID != pairID {
+                    await self.endInviteIfStillWaiting(pairID: previousInviteID, userID: userID)
+                }
                 try? await self.saveMember(
                     pairID: pairID,
                     userID: userID,
-                    nickname: self.nickname,
+                    nickname: trimmedNickname,
                     analysisStatus: "notStarted",
                     recordCount: 0
                 )
-                try? await self.saveProfileSilently(userID: userID, nickname: self.nickname)
             }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -282,6 +279,7 @@ final class PairingStore: ObservableObject {
 
     func previewInvite(userID: String) async -> Bool {
         guard !isPreviewingInvite else { return false }
+        currentUserID = userID
         let pairID = normalizedInviteID(joinInviteID)
         guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
@@ -291,12 +289,13 @@ final class PairingStore: ObservableObject {
         defer { isPreviewingInvite = false }
         state = .working
         do {
-            let snapshot = try await database.collection("pairs").document(pairID).getDocument()
+            let snapshot = try await database.collection("pairs").document(pairID)
+                .getDocument(source: .server)
             guard let data = snapshot.data() else {
-                state = .failed(message: "사용할 수 없는 초대 코드예요.")
+                state = .failed(message: "없는 초대 코드예요. 코드를 다시 확인해 주세요.")
                 return false
             }
-            if let expiresAt = data["expiresAt"] as? Timestamp, expiresAt.dateValue() < Date() {
+            if isExpired(data) {
                 state = .failed(message: "만료된 초대 코드예요. 새 코드를 받아 주세요.")
                 return false
             }
@@ -318,6 +317,7 @@ final class PairingStore: ObservableObject {
 
     func acceptPair(userID: String) async -> Bool {
         guard !isAcceptingInvite else { return false }
+        currentUserID = userID
         let pairID = normalizedInviteID(joinInviteID)
         guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
@@ -370,24 +370,29 @@ final class PairingStore: ObservableObject {
                 }
             }
 
-            inviteID = ""
             joinInviteID = ""
             activePairID = pairID
             self.creatorID = creatorID as? String
             connectedFriendNickname = inviteCreatorNickname
+            savedFirstMetDate = nil
+            firstMetStatus = nil
+            firstMetProposedBy = nil
+            comparisonResult = nil
             pairStatus = "친구와 연결됐어요."
             state = .succeeded(message: "친구와 연결됐어요.")
             listenToPair(documentID: pairID)
+            let myNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
             Task { [weak self] in
                 guard let self else { return }
                 try? await self.saveMember(
                     pairID: pairID,
                     userID: userID,
-                    nickname: self.nickname,
+                    nickname: myNickname,
                     analysisStatus: "notStarted",
                     recordCount: 0
                 )
-                try? await self.saveProfileSilently(userID: userID, nickname: self.nickname)
+                try? await self.saveProfileSilently(userID: userID, nickname: myNickname)
+                await self.reloadFriendSummaries(userID: userID)
             }
             return true
         } catch {
@@ -396,16 +401,15 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    func proposeFirstMetDate(userID: String) async {
-        guard let pairID = activePairID else {
-            state = .failed(message: "먼저 친구와 연결해 주세요.")
-            return
-        }
-
+    /// 기준일을 제안합니다. 어느 연결에 대한 제안인지 pairID로 직접 받아서,
+    /// 다른 화면의 상태 때문에 엉뚱한 연결을 보거나 실패하지 않게 합니다.
+    @discardableResult
+    func proposeFirstMetDate(pairID: String, userID: String) async -> Bool {
+        currentUserID = userID
         let normalizedDate = Calendar.current.startOfDay(for: firstMetDate)
         guard normalizedDate <= Calendar.current.startOfDay(for: Date()) else {
             state = .failed(message: "처음 알게 된 날은 오늘 이후로 정할 수 없어요.")
-            return
+            return false
         }
         state = .working
 
@@ -421,6 +425,7 @@ final class PairingStore: ObservableObject {
                     "updatedAt": FieldValue.serverTimestamp()
                 ])
 
+            activePairID = pairID
             firstMetDate = normalizedDate
             savedFirstMetDate = normalizedDate
             firstMetStatus = "pending"
@@ -429,17 +434,19 @@ final class PairingStore: ObservableObject {
             comparisonResult = nil
             analysisProgress = 0
             state = .succeeded(message: "기준일을 제안했어요. 친구의 확인을 기다리고 있어요.")
+            return true
         } catch {
             state = .failed(message: userFacingMessage(for: error))
+            return false
         }
     }
 
-    func confirmFirstMetDate(userID: String) async {
-        guard let pairID = activePairID,
-              savedFirstMetDate != nil,
-              firstMetStatus == "pending" else {
+    @discardableResult
+    func confirmFirstMetDate(pairID: String, userID: String) async -> Bool {
+        currentUserID = userID
+        guard savedFirstMetDate != nil, firstMetStatus == "pending" else {
             state = .failed(message: "확인할 기준일이 없어요.")
-            return
+            return false
         }
 
         state = .working
@@ -450,10 +457,13 @@ final class PairingStore: ObservableObject {
                 "firstMetConfirmedBy": FieldValue.arrayUnion([userID]),
                 "updatedAt": FieldValue.serverTimestamp()
             ])
+            activePairID = pairID
             firstMetStatus = "confirmed"
             state = .succeeded(message: "두 사람이 기준일을 확인했어요. 기록을 자동으로 준비할게요.")
+            return true
         } catch {
             state = .failed(message: userFacingMessage(for: error))
+            return false
         }
     }
 
@@ -811,6 +821,45 @@ final class PairingStore: ObservableObject {
             data["createdAt"] = FieldValue.serverTimestamp()
         }
         try await reference.setData(data, merge: true)
+
+        let previousNickname = savedProfileNickname ?? snapshot.data()?["nickname"] as? String
+        savedProfileNickname = nickname
+        if let previousNickname, previousNickname != nickname {
+            await propagateNicknameChange(userID: userID, nickname: nickname)
+        }
+    }
+
+    /// 닉네임을 바꾸면 친구에게 보이는 곳(각 연결의 members 문서)도 같이 바꿉니다.
+    /// 옛 닉네임이 적힌 대기 중 초대는 닫아서, 다음 초대에는 새 닉네임이 들어가게 합니다.
+    private func propagateNicknameChange(userID: String, nickname: String) async {
+        guard let pairs = try? await database
+            .collection("pairs")
+            .whereField("memberIds", arrayContains: userID)
+            .getDocuments() else { return }
+
+        for pair in pairs.documents {
+            let data = pair.data()
+            switch data["status"] as? String {
+            case "active":
+                try? await pair.reference.collection("members").document(userID).updateData([
+                    "nickname": nickname,
+                    "updatedAt": FieldValue.serverTimestamp()
+                ])
+            case "waiting" where data["creatorId"] as? String == userID:
+                await endInviteIfStillWaiting(pairID: pair.documentID, userID: userID)
+            default:
+                continue
+            }
+        }
+    }
+
+    /// 홈의 친구 목록을 서버에서 다시 불러옵니다.
+    func reloadFriendSummaries(userID: String) async {
+        guard let snapshot = try? await database
+            .collection("pairs")
+            .whereField("memberIds", arrayContains: userID)
+            .getDocuments() else { return }
+        friendSummaries = await loadFriendSummaries(userID: userID, pairs: snapshot.documents)
     }
 
     private func loadFriendSummaries(
@@ -897,24 +946,38 @@ final class PairingStore: ObservableObject {
     }
 
     private func applyPair(documentID: String, data: [String: Any]) {
-        creatorID = data["creatorId"] as? String
-        if let friend = friendSummaries.first(where: { $0.id == documentID }) {
-            connectedFriendNickname = friend.nickname
-        }
+        let status = data["status"] as? String
 
-        switch data["status"] as? String {
+        // 친구 초대를 수락한 직후에는 캐시에 남은 '대기 중' 스냅샷이 먼저 도착할 수 있습니다.
+        // 내가 만든 초대가 아니면 이 스냅샷은 무시해야, 친구의 코드가 내 초대 코드로 바뀌거나
+        // 방금 연결한 상태가 풀리지 않습니다.
+        if status == "waiting", data["creatorId"] as? String != currentUserID { return }
+
+        creatorID = data["creatorId"] as? String
+
+        switch status {
         case "active":
+            let isNewConnection = activePairID != documentID
             activePairID = documentID
             inviteID = ""
             joinInviteID = ""
             pairStatus = "친구와 연결됐어요."
+            if isNewConnection {
+                connectedFriendNickname = friendSummaries.first(where: { $0.id == documentID })?.nickname ?? "친구"
+            }
             if let userID = currentUserID {
                 listenToMemberReadiness(pairID: documentID, userID: userID)
-                Task { await refreshConnectedFriendNickname(pairID: documentID, userID: userID) }
+                Task {
+                    await refreshConnectedFriendNickname(pairID: documentID, userID: userID)
+                    // 내가 만든 초대를 친구가 수락한 경우, 홈 목록에 새 친구가 바로 보이게 합니다.
+                    if !friendSummaries.contains(where: { $0.id == documentID }) {
+                        await reloadFriendSummaries(userID: userID)
+                    }
+                }
             }
         case "waiting":
             activePairID = nil
-            inviteID = isValidInviteCode(documentID) ? documentID : ""
+            inviteID = isValidInviteCode(documentID) && !isExpired(data) ? documentID : ""
             pairStatus = inviteID.isEmpty ? nil : "친구의 수락을 기다리고 있어요."
             membersListener?.remove()
             membersListener = nil
@@ -946,8 +1009,24 @@ final class PairingStore: ObservableObject {
             guard let memberIDs = pair.data()?["memberIds"] as? [String],
                   let friendID = memberIDs.first(where: { $0 != userID }) else { return }
             let member = try await database.collection("pairs").document(pairID)
-                .collection("members").document(friendID).getDocument()
-            connectedFriendNickname = member.data()?["nickname"] as? String ?? "친구"
+                .collection("members").document(friendID).getDocument(source: .server)
+            guard let latestNickname = member.data()?["nickname"] as? String else { return }
+            if activePairID == pairID { connectedFriendNickname = latestNickname }
+            if let index = friendSummaries.firstIndex(where: { $0.id == pairID }),
+               friendSummaries[index].nickname != latestNickname {
+                let previous = friendSummaries[index]
+                friendSummaries[index] = FriendConnectionSummary(
+                    id: previous.id,
+                    nickname: latestNickname,
+                    score: previous.score,
+                    intersectionDayCount: previous.intersectionDayCount,
+                    closestStrength: previous.closestStrength,
+                    firstMetDate: previous.firstMetDate,
+                    firstMetStatus: previous.firstMetStatus,
+                    hasStoredResult: previous.hasStoredResult,
+                    isReady: previous.isReady
+                )
+            }
         } catch {
             // The connection remains usable even if the display name cannot be refreshed yet.
         }
@@ -976,8 +1055,13 @@ final class PairingStore: ObservableObject {
                 }
 
                 Task { @MainActor [weak self] in
-                    guard let self,
-                          documents.allSatisfy({ self.memberIsReady($0.data()) }),
+                    guard let self else { return }
+
+                    // 멤버 문서에는 상대방에게 보여 줄 최신 닉네임도 들어 있습니다.
+                    // 준비 상태뿐 아니라 닉네임 변경도 같은 리스너에서 바로 반영합니다.
+                    await self.refreshConnectedFriendNickname(pairID: pairID, userID: userID)
+
+                    guard documents.allSatisfy({ self.memberIsReady($0.data()) }),
                           self.isFirstMetDateConfirmed,
                           self.comparisonResult == nil,
                           !self.analysisInFlight else { return }
@@ -986,6 +1070,10 @@ final class PairingStore: ObservableObject {
                     self.analysisInFlight = false
                 }
             }
+    }
+
+    func isValidInviteCodeFormat(_ value: String) -> Bool {
+        isValidInviteCode(normalizedInviteID(value))
     }
 
     private func normalizedInviteID(_ value: String) -> String {
@@ -1006,8 +1094,14 @@ final class PairingStore: ObservableObject {
     private func makeUniqueInviteCode() async throws -> String {
         for _ in 0..<8 {
             let candidate = makeInviteCode()
-            let snapshot = try await database.collection("pairs").document(candidate).getDocument()
-            if !snapshot.exists { return candidate }
+            do {
+                let snapshot = try await database.collection("pairs").document(candidate)
+                    .getDocument(source: .server)
+                if !snapshot.exists { return candidate }
+            } catch let error where isPermissionDenied(error) {
+                // 규칙상 읽을 수 없는 문서는 이미 쓰이는 코드입니다. 다른 코드로 다시 시도합니다.
+                continue
+            }
         }
         throw NSError(
             domain: "InviteCode",
@@ -1016,16 +1110,9 @@ final class PairingStore: ObservableObject {
         )
     }
 
-    private func createPairDocument(
-        userID: String,
-        nickname: String,
-        previousInviteID: String?
-    ) async throws -> String {
+    private func createPairDocument(userID: String, nickname: String) async throws -> String {
         let pairID = try await makeUniqueInviteCode()
-        let pairReference = database.collection("pairs").document(pairID)
-        let batch = database.batch()
-
-        batch.setData([
+        try await database.collection("pairs").document(pairID).setData([
             "creatorId": userID,
             "creatorNickname": nickname,
             "memberIds": [userID],
@@ -1033,17 +1120,42 @@ final class PairingStore: ObservableObject {
             "expiresAt": Timestamp(date: Date().addingTimeInterval(24 * 60 * 60)),
             "createdAt": FieldValue.serverTimestamp(),
             "updatedAt": FieldValue.serverTimestamp()
-        ], forDocument: pairReference)
+        ])
+        return pairID
+    }
 
-        if let previousInviteID, previousInviteID != pairID {
-            batch.updateData([
-                "status": "ended",
-                "updatedAt": FieldValue.serverTimestamp()
-            ], forDocument: database.collection("pairs").document(previousInviteID))
+    /// 새 코드를 만든 뒤 예전 코드를 닫습니다. 상태 확인과 종료를 한 트랜잭션으로 묶어,
+    /// 그사이 친구가 예전 코드를 수락했다면 활성 연결을 건드리지 않습니다.
+    private func endInviteIfStillWaiting(pairID: String, userID: String) async {
+        let reference = database.collection("pairs").document(pairID)
+        let result = try? await database.runTransaction { transaction, errorPointer -> Any? in
+            do {
+                let snapshot = try transaction.getDocument(reference)
+                guard let data = snapshot.data(),
+                      data["status"] as? String == "waiting",
+                      data["creatorId"] as? String == userID else {
+                    return false
+                }
+
+                transaction.updateData([
+                    "status": "ended",
+                    "updatedAt": FieldValue.serverTimestamp()
+                ], forDocument: reference)
+                return true
+            } catch {
+                errorPointer?.pointee = error as NSError
+                return nil
+            }
         }
 
-        try await batch.commit()
-        return pairID
+        if result as? Bool == true, inviteID == pairID {
+            inviteID = ""
+        }
+    }
+
+    private func isExpired(_ data: [String: Any]) -> Bool {
+        guard let expiresAt = data["expiresAt"] as? Timestamp else { return false }
+        return expiresAt.dateValue() < Date()
     }
 
     private func isPermissionDenied(_ error: Error) -> Bool {

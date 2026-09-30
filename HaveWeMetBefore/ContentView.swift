@@ -62,7 +62,10 @@ struct ContentView: View {
                     .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")") {
                         await prepareAndCompareIfNeeded(userID: userID)
                     }
-                    .sheet(item: $activeSheet) { sheet in
+                    .sheet(item: $activeSheet, onDismiss: {
+                        // 초대/연결/기준일 화면을 닫으면 홈 목록을 서버 기준으로 다시 맞춥니다.
+                        Task { await pairing.reloadFriendSummaries(userID: userID) }
+                    }) { sheet in
                         sheetContent(sheet, userID: userID)
                     }
                 }
@@ -554,6 +557,13 @@ private struct InviteCreateView: View {
                     .disabled(pairing.isCreatingInvite || !pairing.hasValidNickname)
                     .opacity(pairing.isCreatingInvite || !pairing.hasValidNickname ? 0.35 : 1)
                 }
+                if case .failed(let message) = pairing.state {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 10)
+                }
                 Spacer()
                 if pairing.inviteID.isEmpty {
                     Button(pairing.isCreatingInvite ? "초대 코드 만드는 중..." : "초대 코드 만들기") {
@@ -584,6 +594,9 @@ private struct InviteJoinFlowView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var stage: Stage = .code
     @State private var showsNicknameRecovery = false
+    @State private var joinedPairID: String?
+
+    private var typedCode: String { pairing.joinInviteID }
 
     var body: some View {
         NavigationStack {
@@ -621,9 +634,10 @@ private struct InviteJoinFlowView: View {
                     if normalized != value { pairing.joinInviteID = normalized }
                     pairing.clearOperationError()
                 }
+            codeHint
             operationMessage
             Spacer()
-            Button("확인") {
+            Button(pairing.isPreviewingInvite ? "확인 중..." : "확인") {
                 Task {
                     if await pairing.previewInvite(userID: userID) { stage = .consent }
                 }
@@ -656,8 +670,12 @@ private struct InviteJoinFlowView: View {
             operationMessage
             Spacer()
             Button(pairing.isAcceptingInvite ? "연결 중..." : "연결하기") {
+                let pairID = pairing.joinInviteID
                 Task {
-                    if await pairing.acceptPair(userID: userID) { stage = .date }
+                    if await pairing.acceptPair(userID: userID) {
+                        joinedPairID = pairID
+                        stage = .date
+                    }
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
@@ -671,8 +689,21 @@ private struct InviteJoinFlowView: View {
         }
     }
 
-    private var dateScreen: some View {
-        FirstMetDateEntryView(pairing: pairing, userID: userID) { dismiss() }
+    @ViewBuilder private var dateScreen: some View {
+        if let joinedPairID {
+            FirstMetDateEntryView(pairing: pairing, pairID: joinedPairID, userID: userID) { dismiss() }
+        }
+    }
+
+    /// '확인' 버튼이 왜 눌리지 않는지 알려 줍니다.
+    @ViewBuilder private var codeHint: some View {
+        if !pairing.hasValidNickname {
+            Text("위에서 닉네임(1~12자)을 먼저 입력해 주세요.")
+                .font(.caption).foregroundStyle(AppTheme.secondaryText).padding(.top, 10)
+        } else if typedCode.count == 6, !pairing.isValidInviteCodeFormat(typedCode) {
+            Text("초대 코드에는 숫자 0, 1과 영문 O, I가 들어가지 않아요. 다시 확인해 주세요.")
+                .font(.caption).foregroundStyle(AppTheme.secondaryText).padding(.top, 10)
+        }
     }
 
     @ViewBuilder private var operationMessage: some View {
@@ -709,8 +740,10 @@ private struct InviteNicknameField: View {
 
 private struct FirstMetDateEntryView: View {
     @ObservedObject var pairing: PairingStore
+    let pairID: String
     let userID: String
     let onSaved: () -> Void
+    @State private var isSending = false
 
     var body: some View {
         FlowScreen(
@@ -727,27 +760,38 @@ private struct FirstMetDateEntryView: View {
             .datePickerStyle(.graphical)
             .tint(AppTheme.primary)
             .padding(.top, 20)
+            if case .failed(let message) = pairing.state {
+                Text(message).font(.caption).foregroundStyle(.red).padding(.top, 10)
+            }
             Spacer()
-            Button("확인 요청 보내기") {
+            Button(isSending ? "보내는 중..." : "확인 요청 보내기") {
+                isSending = true
                 Task {
-                    await pairing.proposeFirstMetDate(userID: userID)
-                    onSaved()
+                    // 저장에 성공했을 때만 화면을 닫습니다. 실패하면 이유를 보여 줍니다.
+                    let saved = await pairing.proposeFirstMetDate(pairID: pairID, userID: userID)
+                    isSending = false
+                    if saved { onSaved() }
                 }
             }
             .buttonStyle(PrimaryActionButtonStyle())
+            .disabled(isSending)
+            .opacity(isSending ? 0.6 : 1)
         }
+        .onAppear { pairing.clearOperationError() }
     }
 }
 
 private struct FirstMetDateConfirmationView: View {
     @ObservedObject var pairing: PairingStore
+    let pairID: String
     let userID: String
     var onBack: (() -> Void)?
     @State private var editing = false
+    @State private var isConfirming = false
 
     var body: some View {
         if editing {
-            FirstMetDateEntryView(pairing: pairing, userID: userID) { editing = false }
+            FirstMetDateEntryView(pairing: pairing, pairID: pairID, userID: userID) { editing = false }
         } else {
             FlowScreen(
                 title: "\(pairing.connectedFriendNickname)님이 처음 알게 된\n날을 입력했어요",
@@ -766,13 +810,20 @@ private struct FirstMetDateConfirmationView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.secondaryText)
                     .padding(.top, 24)
+                if case .failed(let message) = pairing.state {
+                    Text(message).font(.caption).foregroundStyle(.red).padding(.top, 10)
+                }
                 Spacer()
-                Button("동의하기") {
+                Button(isConfirming ? "확인하는 중..." : "동의하기") {
+                    isConfirming = true
                     Task {
-                        await pairing.confirmFirstMetDate(userID: userID)
+                        await pairing.confirmFirstMetDate(pairID: pairID, userID: userID)
+                        isConfirming = false
                     }
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
+                .disabled(isConfirming)
+                .opacity(isConfirming ? 0.6 : 1)
                 Button("날짜 수정하기") { editing = true }
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(AppTheme.secondaryText)
@@ -907,6 +958,7 @@ private struct FriendDetailFlowView: View {
     let userID: String
     @Environment(\.dismiss) private var dismiss
     @State private var didLoad = false
+    @State private var loadError: String?
 
     var body: some View {
         Group {
@@ -917,22 +969,21 @@ private struct FriendDetailFlowView: View {
                     result: result,
                     firstMetDate: pairing.savedFirstMetDate ?? friend.firstMetDate ?? Date(),
                     firstNickname: pairing.nickname,
-                    secondNickname: friend.nickname
+                    secondNickname: pairing.connectedFriendNickname
                 )
-            } else if case .failed(let message) = pairing.state {
-                FlowErrorView(title: "결과를 열 수 없어요", message: message, primaryTitle: "다시 시도하기") {
-                    Task {
-                        didLoad = false
-                        await pairing.openPair(pairID: friend.id, userID: userID)
-                        didLoad = true
-                    }
+            } else if let loadError {
+                // 연결 정보를 불러오지 못했을 때만 오류 화면을 보여 줍니다.
+                // (기준일 저장 실패 같은 오류는 각 화면 안에서 빨간 글씨로 보여 줍니다.)
+                FlowErrorView(title: "결과를 열 수 없어요", message: loadError, primaryTitle: "다시 시도하기") {
+                    Task { await load() }
                 }
             } else if pairing.firstMetStatus == nil {
-                FirstMetDateEntryView(pairing: pairing, userID: userID) { dismiss() }
+                FirstMetDateEntryView(pairing: pairing, pairID: friend.id, userID: userID) { dismiss() }
             } else if pairing.firstMetStatus == "pending" {
                 if pairing.needsFirstMetDateConfirmation(userID: userID) {
                     FirstMetDateConfirmationView(
                         pairing: pairing,
+                        pairID: friend.id,
                         userID: userID,
                         onBack: { dismiss() }
                     )
@@ -951,10 +1002,15 @@ private struct FriendDetailFlowView: View {
                 ProgressView()
             }
         }
-        .task(id: friend.id) {
-            await pairing.openPair(pairID: friend.id, userID: userID)
-            didLoad = true
-        }
+        .task(id: friend.id) { await load() }
+    }
+
+    private func load() async {
+        didLoad = false
+        loadError = nil
+        await pairing.openPair(pairID: friend.id, userID: userID)
+        if case .failed(let message) = pairing.state { loadError = message }
+        didLoad = true
     }
 }
 

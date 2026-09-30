@@ -271,8 +271,10 @@ service cloud.firestore {
     }
 
     match /pairs/{pairId} {
+      // resource == null: 새 초대 코드 중복 확인용(없는 문서 조회) 허용
       allow get: if signedIn()
-        && (request.auth.uid in resource.data.memberIds
+        && (resource == null
+          || request.auth.uid in resource.data.memberIds
           || resource.data.status == 'waiting');
 
       allow list: if signedIn()
