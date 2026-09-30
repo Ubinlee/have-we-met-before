@@ -27,7 +27,9 @@ enum DestinyScorer {
             intersections.map { calendar.startOfDay(for: $0.occurredAt) }
         )
         let additionalDayCount = max(0, intersectionDays.count - 1)
-        let repeatedIntersectionScore = min(5, additionalDayCount) * 6
+        // 반복 교차는 하루당 4점, 최대 20점만 더합니다.
+        // 강한 교차 하나와 반복 기록만으로 점수가 쉽게 100점이 되지 않게 합니다.
+        let repeatedIntersectionScore = min(5, additionalDayCount) * 4
         let score = min(
             100,
             baseScore(for: closestIntersection.strength) + repeatedIntersectionScore

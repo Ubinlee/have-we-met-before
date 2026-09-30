@@ -59,7 +59,7 @@ struct ContentView: View {
                         }
                         await pairing.loadLatestPair(userID: userID)
                     }
-                    .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")") {
+                    .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")-\(pairing.analysisRunRevision)") {
                         await prepareAndCompareIfNeeded(userID: userID)
                     }
                     .sheet(item: $activeSheet, onDismiss: {
@@ -101,7 +101,7 @@ struct ContentView: View {
               let cutoff = pairing.savedFirstMetDate,
               pairing.comparisonResult == nil else { return }
 
-        let key = "\(pairID)-\(cutoff.timeIntervalSince1970)"
+        let key = "\(pairID)-\(cutoff.timeIntervalSince1970)-\(pairing.analysisRunRevision)"
         guard lastPreparedKey != key else { return }
         lastPreparedKey = key
         await pairing.prepareVisits(userID: userID, events: analyzer.summary.visitEvents)
@@ -438,6 +438,25 @@ private struct HomeView: View {
             }
             .foregroundStyle(AppTheme.primary)
             .padding(.top, -20)
+
+            if analyzer.scanState == .finished {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("내 사진 분석 완료")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("유효한 방문 기록 \(analyzer.summary.visitEvents.count.formatted())개")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+                    Spacer()
+                }
+                .padding(14)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .overlay { RoundedRectangle(cornerRadius: 9).stroke(AppTheme.divider) }
+            }
 
             if pairing.friendSummaries.isEmpty {
                 InfoCard {
@@ -871,6 +890,7 @@ private struct FriendRankingRow: View {
 private struct AnalysisProgressView: View {
     @ObservedObject var pairing: PairingStore
     var onBack: (() -> Void)?
+    let onCancel: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     private var progress: Double {
@@ -935,8 +955,9 @@ private struct AnalysisProgressView: View {
 
             Spacer()
 
-            Text("분석 취소")
-                .font(.system(size: 13))
+            Button("분석 취소", action: onCancel)
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(AppTheme.secondaryText)
                 .padding(.bottom, 22)
         }
@@ -997,7 +1018,12 @@ private struct FriendDetailFlowView: View {
                     )
                 }
             } else if pairing.isFirstMetDateConfirmed {
-                AnalysisProgressView(pairing: pairing)
+                AnalysisProgressView(pairing: pairing) {
+                    Task {
+                        await pairing.cancelAnalysis(pairID: friend.id, userID: userID)
+                        dismiss()
+                    }
+                }
             } else {
                 ProgressView()
             }

@@ -16,7 +16,7 @@ struct FriendConnectionSummary: Identifiable, Sendable {
 
 @MainActor
 final class PairingStore: ObservableObject {
-    private static let recordSchemaVersion = 2
+    private static let recordSchemaVersion = 3
 
     enum OperationState: Equatable {
         case idle
@@ -48,6 +48,7 @@ final class PairingStore: ObservableObject {
     @Published private(set) var isCreatingInvite = false
     @Published private(set) var isPreviewingInvite = false
     @Published private(set) var isAcceptingInvite = false
+    @Published private(set) var analysisRunRevision = 0
 
     private let database = Firestore.firestore()
     private var pairListener: ListenerRegistration?
@@ -57,6 +58,7 @@ final class PairingStore: ObservableObject {
     private var savedProfileNickname: String?
     private var analysisInFlight = false
     private var resultCache: [String: DestinyScoreResult] = [:]
+    private var cancelledAnalysisPairIDs: Set<String> = []
 
     var isWorking: Bool { state == .working }
 
@@ -152,6 +154,9 @@ final class PairingStore: ObservableObject {
 
     func openPair(pairID: String, userID: String) async {
         currentUserID = userID
+        if cancelledAnalysisPairIDs.remove(pairID) != nil {
+            analysisRunRevision += 1
+        }
         comparisonResult = nil
         connectedFriendNickname = friendSummaries.first(where: { $0.id == pairID })?.nickname ?? "친구"
         state = .working
@@ -473,6 +478,8 @@ final class PairingStore: ObservableObject {
             return
         }
 
+        guard !cancelledAnalysisPairIDs.contains(pairID) else { return }
+
         guard let cutoffDate = savedFirstMetDate, isFirstMetDateConfirmed else {
             state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
             return
@@ -483,8 +490,8 @@ final class PairingStore: ObservableObject {
         )
         state = .working
         analysisProgress = max(analysisProgress, 0.18)
-        isWaitingForRecords = false
-        analysisMessage = "내 사진 기록을 분석용 데이터로 준비하고 있어요."
+        isWaitingForRecords = true
+        analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
 
         do {
             try await saveMember(
@@ -494,8 +501,10 @@ final class PairingStore: ObservableObject {
                 analysisStatus: "analyzing",
                 recordCount: records.count
             )
+            guard await continueAnalysis(pairID: pairID, userID: userID) else { return }
 
             try await replaceVisits(pairID: pairID, userID: userID, records: records)
+            guard await continueAnalysis(pairID: pairID, userID: userID) else { return }
             analysisProgress = max(analysisProgress, 0.48)
 
             try await saveMember(
@@ -505,11 +514,14 @@ final class PairingStore: ObservableObject {
                 analysisStatus: "ready",
                 recordCount: records.count
             )
+            guard await continueAnalysis(pairID: pairID, userID: userID) else { return }
 
             uploadedRecordCount = records.count
             analysisProgress = max(analysisProgress, 0.68)
-            analysisMessage = "친구의 기록 준비 상태를 확인하고 있어요."
+            analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
             state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
+        } catch is CancellationError {
+            await markMemberAnalysisCancelled(pairID: pairID, userID: userID)
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -520,6 +532,8 @@ final class PairingStore: ObservableObject {
             state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
             return
         }
+        guard let pairID = currentPairID,
+              !cancelledAnalysisPairIDs.contains(pairID) else { return }
         analysisProgress = max(analysisProgress, 0.72)
         analysisMessage = "두 사람의 기록 상태를 확인하고 있어요."
         await compareWithFriend(userID: userID)
@@ -530,6 +544,7 @@ final class PairingStore: ObservableObject {
             state = .failed(message: "연결된 친구가 없어요.")
             return
         }
+        guard !cancelledAnalysisPairIDs.contains(pairID) else { return }
 
         state = .working
         isWaitingForRecords = false
@@ -576,6 +591,7 @@ final class PairingStore: ObservableObject {
                 .document(friendID)
                 .getDocument()
             let (ownMemberSnapshot, friendMemberSnapshot) = try await (ownMember, friendMember)
+            guard !cancelledAnalysisPairIDs.contains(pairID) else { return }
 
             guard memberIsReady(
                 ownMemberSnapshot.data()
@@ -603,6 +619,7 @@ final class PairingStore: ObservableObject {
             async let friendSnapshot = visitsCollection(pairID: pairID, userID: friendID)
                 .getDocuments()
             let (ownDocuments, friendDocuments) = try await (ownSnapshot, friendSnapshot)
+            guard !cancelledAnalysisPairIDs.contains(pairID) else { return }
             analysisProgress = max(analysisProgress, 0.9)
 
             let ownRecords = ownDocuments.documents
@@ -620,6 +637,7 @@ final class PairingStore: ObservableObject {
                 intersections: intersections,
                 calendar: .autoupdatingCurrent
             )
+            guard !cancelledAnalysisPairIDs.contains(pairID) else { return }
 
             try await saveComparisonResult(
                 result,
@@ -644,6 +662,34 @@ final class PairingStore: ObservableObject {
         }
     }
 
+    func cancelAnalysis(pairID: String, userID: String) async {
+        cancelledAnalysisPairIDs.insert(pairID)
+        analysisInFlight = false
+        analysisProgress = 0
+        isWaitingForRecords = false
+        analysisMessage = "분석을 취소했어요."
+        state = .succeeded(message: "분석을 취소했어요.")
+        await markMemberAnalysisCancelled(pairID: pairID, userID: userID)
+    }
+
+    private func continueAnalysis(pairID: String, userID: String) async -> Bool {
+        guard !cancelledAnalysisPairIDs.contains(pairID), !Task.isCancelled else {
+            await markMemberAnalysisCancelled(pairID: pairID, userID: userID)
+            return false
+        }
+        return true
+    }
+
+    private func markMemberAnalysisCancelled(pairID: String, userID: String) async {
+        try? await saveMember(
+            pairID: pairID,
+            userID: userID,
+            nickname: nickname,
+            analysisStatus: "notStarted",
+            recordCount: 0
+        )
+    }
+
     private func replaceVisits(
         pairID: String,
         userID: String,
@@ -653,12 +699,18 @@ final class PairingStore: ObservableObject {
         let existing = try await collection.getDocuments()
 
         for chunk in existing.documents.chunked(maximumCount: 400) {
+            guard !cancelledAnalysisPairIDs.contains(pairID), !Task.isCancelled else {
+                throw CancellationError()
+            }
             let batch = database.batch()
             chunk.forEach { batch.deleteDocument($0.reference) }
             try await batch.commit()
         }
 
         for chunk in records.chunked(maximumCount: 400) {
+            guard !cancelledAnalysisPairIDs.contains(pairID), !Task.isCancelled else {
+                throw CancellationError()
+            }
             let batch = database.batch()
             for record in chunk {
                 batch.setData([
@@ -1061,7 +1113,8 @@ final class PairingStore: ObservableObject {
                     // 준비 상태뿐 아니라 닉네임 변경도 같은 리스너에서 바로 반영합니다.
                     await self.refreshConnectedFriendNickname(pairID: pairID, userID: userID)
 
-                    guard documents.allSatisfy({ self.memberIsReady($0.data()) }),
+                    guard !self.cancelledAnalysisPairIDs.contains(pairID),
+                          documents.allSatisfy({ self.memberIsReady($0.data()) }),
                           self.isFirstMetDateConfirmed,
                           self.comparisonResult == nil,
                           !self.analysisInFlight else { return }

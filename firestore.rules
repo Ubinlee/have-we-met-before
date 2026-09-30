@@ -136,7 +136,7 @@ service cloud.firestore {
         && data.recordCount is int
         && data.recordCount >= 0
         && (!('recordSchemaVersion' in data)
-          || data.recordSchemaVersion in [1, 2])
+          || data.recordSchemaVersion in [1, 2, 3])
         && data.updatedAt is timestamp;
     }
 
@@ -156,12 +156,12 @@ service cloud.firestore {
         && data.timeBucketIndex is int
         && data.timeBucketIndex >= 0
         && data.latitudeCell is int
-        && data.latitudeCell >= -9000
-        && data.latitudeCell <= 9000
+        && data.latitudeCell >= -45000
+        && data.latitudeCell <= 45000
         && data.longitudeCell is int
-        && data.longitudeCell >= -18000
-        && data.longitudeCell <= 18000
-        && data.schemaVersion in [1, 2];
+        && data.longitudeCell >= -90000
+        && data.longitudeCell <= 90000
+        && data.schemaVersion in [1, 2, 3];
     }
 
     function validMatchResult(data) {
@@ -208,7 +208,7 @@ service cloud.firestore {
           || data.closestLongitudeCell is int)
         && data.generatedBy == request.auth.uid
         && data.createdAt is timestamp
-        && data.schemaVersion in [1, 2];
+        && data.schemaVersion in [1, 2, 3];
     }
 
     function validStoredIntersection(data) {

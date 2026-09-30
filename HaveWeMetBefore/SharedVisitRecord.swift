@@ -14,7 +14,9 @@ struct SharedVisitPrivacySettings: Sendable {
     let timeBucketDuration: TimeInterval
 
     static let mvp = SharedVisitPrivacySettings(
-        coordinateStep: 0.01,
+        // 정확한 좌표 대신 약 200m 단위의 격자 번호만 공유합니다.
+        // 기존 약 1.1km 격자는 서로 다른 동네를 같은 지점으로 오판할 수 있었습니다.
+        coordinateStep: 0.002,
         timeBucketDuration: 3 * 60 * 60
     )
 }
@@ -48,7 +50,7 @@ enum SharedVisitRecordBuilder {
         )
         let latitudeCell = Int(floor(event.latitude / settings.coordinateStep))
         let longitudeCell = Int(floor(event.longitude / settings.coordinateStep))
-        let source = "v2:\(timeBucketIndex):\(latitudeCell):\(longitudeCell)"
+        let source = "v3:\(timeBucketIndex):\(latitudeCell):\(longitudeCell)"
         let digest = SHA256.hash(data: Data(source.utf8))
         let id = digest.map { String(format: "%02x", $0) }.joined()
 
@@ -57,7 +59,7 @@ enum SharedVisitRecordBuilder {
             timeBucketIndex: timeBucketIndex,
             latitudeCell: latitudeCell,
             longitudeCell: longitudeCell,
-            schemaVersion: 2
+            schemaVersion: 3
         )
     }
 }
