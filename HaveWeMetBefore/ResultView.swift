@@ -7,6 +7,7 @@ struct ResultView: View {
     var firstNickname: String = "나"
     var secondNickname: String = "친구"
     @State private var placeNames: [String: String] = [:]
+    @State private var selectedMatchID: String?
 
     private var matches: [TrajectoryIntersection] { result.rankedIntersections }
 
@@ -16,9 +17,7 @@ struct ResultView: View {
                 hero
                 VStack(alignment: .leading, spacing: 24) {
                     if let first = matches.first {
-                        closestMoment(first)
-                        Divider()
-                        otherMoments
+                        timeline(first: first)
                     } else {
                         emptyResult
                     }
@@ -38,7 +37,12 @@ struct ResultView: View {
         }
         .background(AppTheme.background)
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: matches.map(\.id)) { await resolvePlaceNames() }
+        .task(id: matches.map(\.id)) {
+            if !matches.contains(where: { $0.id == selectedMatchID }) {
+                selectedMatchID = matches.first?.id
+            }
+            await resolvePlaceNames()
+        }
     }
 
     private var hero: some View {
@@ -79,26 +83,94 @@ struct ResultView: View {
         )
     }
 
-    private func closestMoment(_ match: TrajectoryIntersection) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("가장 가까웠던 날")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(AppTheme.primary)
-            Text(Self.dateFormatter.string(from: match.occurredAt))
-                .font(.system(size: 20, weight: .bold))
-            Text(placeNames[match.id] ?? "위치 이름을 확인하는 중…")
-                .font(.system(size: 14))
-                .foregroundStyle(AppTheme.secondaryText)
-            approximateMap(match)
-            Text("정확한 위치 대신 대략적인 범위만 보여 줘요")
-                .font(.system(size: 11))
-                .foregroundStyle(AppTheme.secondaryText)
-            HStack(spacing: 20) {
-                metric("시간 차이", timeText(match.timeDifference))
-                Divider().frame(height: 32)
-                metric("거리 차이", distanceText(match.distanceMeters))
+    private func timeline(first: TrajectoryIntersection) -> some View {
+        VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("가장 가까웠던 날")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(AppTheme.primary)
+                momentRow(first, showsContinuation: matches.count > 1)
+            }
+
+            if matches.count > 1 {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("다른 순간들")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AppTheme.primary)
+                    VStack(spacing: 0) {
+                        ForEach(Array(matches.dropFirst().enumerated()), id: \.element.id) { index, match in
+                            momentRow(match, showsContinuation: index < matches.count - 2)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private func momentRow(
+        _ match: TrajectoryIntersection,
+        showsContinuation: Bool
+    ) -> some View {
+        let expanded = (selectedMatchID ?? matches.first?.id) == match.id
+
+        return HStack(alignment: .top, spacing: 14) {
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(AppTheme.background)
+                    .stroke(AppTheme.primary, lineWidth: 2)
+                    .frame(width: 10, height: 10)
+                    .padding(.top, 5)
+                if showsContinuation {
+                    Rectangle()
+                        .fill(AppTheme.divider)
+                        .frame(width: 2)
+                }
+            }
+            .frame(maxHeight: .infinity)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        selectedMatchID = match.id
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if expanded {
+                            Text(Self.dateFormatter.string(from: match.occurredAt))
+                                .font(.system(size: 18, weight: .bold))
+                            Text(placeNames[match.id] ?? "위치 이름을 확인하는 중…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(AppTheme.secondaryText)
+                        } else {
+                            Text("\(Self.dateFormatter.string(from: match.occurredAt)) · \(placeNames[match.id] ?? "위치 확인 중")")
+                                .font(.system(size: 14, weight: .bold))
+                            Text("시간 차이 \(timeText(match.timeDifference)) · 거리 \(distanceText(match.distanceMeters))")
+                                .font(.system(size: 12))
+                                .foregroundStyle(AppTheme.secondaryText)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if expanded {
+                    approximateMap(match)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    Text("정확한 위치가 아닌 대략적인 범위예요")
+                        .font(.system(size: 11))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    HStack(spacing: 20) {
+                        metric("시간 차이", timeText(match.timeDifference))
+                        Divider().frame(height: 32)
+                        metric("거리 차이", distanceText(match.distanceMeters))
+                    }
+                }
+            }
+            .padding(.bottom, showsContinuation ? 16 : 0)
+        }
+        // 타임라인 연결선이 펼쳐진 내용의 높이만큼 이어지도록 높이를 내용에 맞춥니다.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func approximateMap(_ match: TrajectoryIntersection) -> some View {
@@ -111,7 +183,17 @@ struct ResultView: View {
             latitudinalMeters: 1_200,
             longitudinalMeters: 1_200
         )
-        return Map(initialPosition: .region(region), interactionModes: []) {
+        // 스크롤과 겹치지 않도록 두 손가락 확대·축소만 허용합니다.
+        // 너무 확대하면 흐린 위치가 정확한 장소처럼 보이므로 확대 한도를 둡니다.
+        return Map(
+            initialPosition: .region(region),
+            bounds: MapCameraBounds(
+                centerCoordinateBounds: region,
+                minimumDistance: 1_000,
+                maximumDistance: 30_000
+            ),
+            interactionModes: [.zoom]
+        ) {
             MapCircle(center: coordinate, radius: 500)
                 .foregroundStyle(AppTheme.primary.opacity(0.17))
                 .stroke(AppTheme.primary.opacity(0.7), style: StrokeStyle(lineWidth: 1.5, dash: [4]))
@@ -119,32 +201,7 @@ struct ResultView: View {
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
         .frame(height: 169)
         .clipShape(RoundedRectangle(cornerRadius: 9))
-    }
-
-    @ViewBuilder
-    private var otherMoments: some View {
-        if matches.count > 1 {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("다른 순간들")
-                    .font(.system(size: 14, weight: .bold))
-                ForEach(Array(matches.dropFirst().enumerated()), id: \.element.id) { _, match in
-                    HStack(alignment: .top, spacing: 14) {
-                        Circle()
-                            .fill(AppTheme.background)
-                            .stroke(AppTheme.primary, lineWidth: 2)
-                            .frame(width: 10, height: 10)
-                            .padding(.top, 4)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(Self.dateFormatter.string(from: match.occurredAt)) · \(placeNames[match.id] ?? "위치 확인 중")")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("시간 차이 \(timeText(match.timeDifference)) · 거리 \(distanceText(match.distanceMeters))")
-                                .font(.system(size: 12))
-                                .foregroundStyle(AppTheme.secondaryText)
-                        }
-                    }
-                }
-            }
-        }
+        .id(match.id)
     }
 
     private var emptyResult: some View {

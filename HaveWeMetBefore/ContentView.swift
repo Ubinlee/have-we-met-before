@@ -59,7 +59,7 @@ struct ContentView: View {
                         }
                         await pairing.loadLatestPair(userID: userID)
                     }
-                    .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")-\(pairing.analysisRunRevision)") {
+                    .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")-\(pairing.analysisRunRevision)-\(pairing.activePairID.map(pairing.canStartAutomaticAnalysis) ?? false)") {
                         await prepareAndCompareIfNeeded(userID: userID)
                     }
                     .sheet(item: $activeSheet, onDismiss: {
@@ -95,11 +95,30 @@ struct ContentView: View {
     }
 
     private func prepareAndCompareIfNeeded(userID: String) async {
+        // 저장된 결과 조회가 끝나기 전이거나 사용자가 취소한 페어는 자동으로 준비하지 않습니다.
         guard pairing.isFirstMetDateConfirmed,
-              analyzer.scanState == .finished,
               let pairID = pairing.activePairID,
               let cutoff = pairing.savedFirstMetDate,
-              pairing.comparisonResult == nil else { return }
+              pairing.comparisonResult == nil,
+              pairing.canStartAutomaticAnalysis(pairID: pairID) else { return }
+
+        switch analyzer.scanState {
+        case .finished:
+            break
+        case .scanning:
+            // 스캔이 끝나면 scanState가 바뀌어 이 작업이 다시 실행됩니다.
+            return
+        case .idle, .failed:
+            if analyzer.canReadPhotos {
+                await analyzer.scan()
+            } else {
+                pairing.reportAnalysisUnavailable(
+                    pairID: pairID,
+                    message: "사진 접근 권한이 없어 기록을 준비할 수 없어요. 설정에서 사진 접근을 허용한 뒤 다시 시도해 주세요."
+                )
+            }
+            return
+        }
 
         let key = "\(pairID)-\(cutoff.timeIntervalSince1970)-\(pairing.analysisRunRevision)"
         guard lastPreparedKey != key else { return }
@@ -1018,10 +1037,21 @@ private struct FriendDetailFlowView: View {
                     )
                 }
             } else if pairing.isFirstMetDateConfirmed {
-                AnalysisProgressView(pairing: pairing) {
-                    Task {
-                        await pairing.cancelAnalysis(pairID: friend.id, userID: userID)
-                        dismiss()
+                if pairing.analysisNeedsRestart {
+                    StatusMessageView(
+                        title: "분석이 중단됐어요",
+                        message: pairing.analysisRestartMessage,
+                        symbol: "arrow.clockwise.circle",
+                        buttonTitle: "다시 분석하기"
+                    ) {
+                        pairing.restartAnalysis(pairID: friend.id)
+                    }
+                } else {
+                    AnalysisProgressView(pairing: pairing) {
+                        Task {
+                            await pairing.cancelAnalysis(pairID: friend.id, userID: userID)
+                            dismiss()
+                        }
                     }
                 }
             } else {

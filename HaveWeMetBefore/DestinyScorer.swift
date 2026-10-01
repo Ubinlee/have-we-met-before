@@ -27,12 +27,14 @@ enum DestinyScorer {
             intersections.map { calendar.startOfDay(for: $0.occurredAt) }
         )
         let additionalDayCount = max(0, intersectionDays.count - 1)
-        // 반복 교차는 하루당 4점, 최대 20점만 더합니다.
-        // 강한 교차 하나와 반복 기록만으로 점수가 쉽게 100점이 되지 않게 합니다.
+        // 가장 가까운 순간은 거리 40점 + 시간(3시간 구간 차이) 40점으로 계산합니다.
+        // 반복 교차는 추가로 겹친 날짜마다 4점, 최대 20점을 더합니다.
         let repeatedIntersectionScore = min(5, additionalDayCount) * 4
         let score = min(
             100,
-            baseScore(for: closestIntersection.strength) + repeatedIntersectionScore
+            distanceScore(for: closestIntersection.distanceMeters)
+                + timeScore(for: closestIntersection.timeDifference)
+                + repeatedIntersectionScore
         )
         let rankedIntersections = bestIntersectionPerDay(
             intersections,
@@ -60,14 +62,39 @@ enum DestinyScorer {
         .sorted(by: isBetterIntersection)
     }
 
-    private static func baseScore(for strength: IntersectionStrength) -> Int {
-        switch strength {
-        case .strong:
-            70
-        case .close:
-            50
-        case .loose:
-            30
+    private static func distanceScore(for meters: Double) -> Int {
+        switch meters {
+        case ...100: 40
+        case ...300: interpolatedScore(meters, from: 100, score: 40, to: 300, score: 36)
+        case ...500: interpolatedScore(meters, from: 300, score: 36, to: 500, score: 32)
+        case ...1_000: interpolatedScore(meters, from: 500, score: 32, to: 1_000, score: 25)
+        case ...3_000: interpolatedScore(meters, from: 1_000, score: 25, to: 3_000, score: 15)
+        case ...5_000: interpolatedScore(meters, from: 3_000, score: 15, to: 5_000, score: 8)
+        default: 0
+        }
+    }
+
+    private static func interpolatedScore(
+        _ value: Double,
+        from lowerValue: Double,
+        score lowerScore: Double,
+        to upperValue: Double,
+        score upperScore: Double
+    ) -> Int {
+        let progress = (value - lowerValue) / (upperValue - lowerValue)
+        return Int((lowerScore + (upperScore - lowerScore) * progress).rounded())
+    }
+
+    /// 서버에 공유되는 시간은 3시간 구간이라 시간 차이도 구간 차이로만 계산합니다.
+    /// 0구간(같은 3시간 구간) 40점, 1구간 24점, 2구간 14점, 그 이상 7점입니다.
+    private static func timeScore(for interval: TimeInterval) -> Int {
+        let bucketDuration = SharedVisitPrivacySettings.mvp.timeBucketDuration
+        let bucketDifference = Int((max(0, interval) / bucketDuration).rounded())
+        switch bucketDifference {
+        case 0: return 40
+        case 1: return 24
+        case 2: return 14
+        default: return 7
         }
     }
 
