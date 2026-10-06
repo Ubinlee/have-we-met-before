@@ -743,6 +743,12 @@ final class PairingStore: ObservableObject {
 
             let plan = visitUploadPlan(existing: existing.documents, records: records)
             let memberData = member.data()
+            if isDisplaying(pairID) {
+                analysisProgress = max(analysisProgress, 0.24)
+                analysisMessage = plan.isEmpty
+                    ? "저장된 사진 기록을 확인하고 있어요."
+                    : "분석할 사진 기록 \(records.count)개를 준비했어요."
+            }
             // 바뀐 기록이 없고 이미 ready로 저장돼 있으면 상태를 다시 쓰지 않습니다.
             // analyzing으로 다시 쓰면 상대 기기의 비교가 그 순간 '준비 중'으로 읽고 멈출 수 있습니다.
             let alreadyReady = plan.isEmpty
@@ -763,7 +769,8 @@ final class PairingStore: ObservableObject {
                     plan,
                     pairID: pairID,
                     userID: userID,
-                    generation: generation
+                    generation: generation,
+                    totalRecordCount: records.count
                 )
                 guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
                 if isDisplaying(pairID) {
@@ -1101,20 +1108,38 @@ final class PairingStore: ObservableObject {
         _ plan: VisitUploadPlan,
         pairID: String,
         userID: String,
-        generation: Int
+        generation: Int,
+        totalRecordCount: Int
     ) async throws {
         let collection = visitsCollection(pairID: pairID, userID: userID)
+        let staleChunks = plan.staleDocuments.chunked(maximumCount: 400)
+        let missingChunks = plan.missingRecords.chunked(maximumCount: 400)
+        let totalChunks = staleChunks.count + missingChunks.count
+        var completedChunks = 0
 
-        for chunk in plan.staleDocuments.chunked(maximumCount: 400) {
+        func updateUploadProgress() {
+            guard totalChunks > 0, isDisplaying(pairID) else { return }
+            let fraction = Double(completedChunks) / Double(totalChunks)
+            analysisProgress = max(analysisProgress, 0.26 + (0.34 * fraction))
+            let processed = min(
+                totalRecordCount,
+                Int((Double(totalRecordCount) * fraction).rounded())
+            )
+            analysisMessage = "사진 기록을 안전하게 준비하고 있어요. \(processed)/\(totalRecordCount)"
+        }
+
+        for chunk in staleChunks {
             guard isCurrentRun(generation, pairID: pairID), !Task.isCancelled else {
                 throw CancellationError()
             }
             let batch = database.batch()
             chunk.forEach { batch.deleteDocument($0.reference) }
             try await batch.commit()
+            completedChunks += 1
+            updateUploadProgress()
         }
 
-        for chunk in plan.missingRecords.chunked(maximumCount: 400) {
+        for chunk in missingChunks {
             guard isCurrentRun(generation, pairID: pairID), !Task.isCancelled else {
                 throw CancellationError()
             }
@@ -1128,6 +1153,8 @@ final class PairingStore: ObservableObject {
                 ], forDocument: collection.document(record.id))
             }
             try await batch.commit()
+            completedChunks += 1
+            updateUploadProgress()
         }
     }
 
