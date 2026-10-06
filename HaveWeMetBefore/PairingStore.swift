@@ -234,19 +234,72 @@ final class PairingStore: ObservableObject {
     func disconnectPair(pairID: String, userID: String) async {
         state = .working
         do {
-            try await database.collection("pairs").document(pairID).updateData([
-                "status": "ended",
-                "updatedAt": FieldValue.serverTimestamp()
-            ])
-            friendSummaries.removeAll { $0.id == pairID }
-            if activePairID == pairID {
+            let selectedPair = try await database.collection("pairs").document(pairID)
+                .getDocument(source: .server)
+            guard let memberIDs = selectedPair.data()?["memberIds"] as? [String],
+                  let friendID = memberIDs.first(where: { $0 != userID }) else {
+                throw NSError(
+                    domain: "PairingStore",
+                    code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "연결된 친구 정보를 찾을 수 없어요."]
+                )
+            }
+
+            // 중복 연결 방지가 추가되기 전에 같은 두 사람 사이에 active 페어가 여러 개 생긴
+            // 기존 데이터가 있을 수 있습니다. 선택한 한 건만 종료하면 숨은 active 페어가
+            // '이미 연결된 친구' 검사에 계속 걸리므로, 같은 친구와의 active 연결을 모두 종료합니다.
+            let allPairs = try await database.collection("pairs")
+                .whereField("memberIds", arrayContains: userID)
+                .getDocuments(source: .server)
+            let matchingPairs = allPairs.documents.filter { document in
+                let data = document.data()
+                guard data["status"] as? String == "active",
+                      let ids = data["memberIds"] as? [String] else { return false }
+                return ids.contains(friendID)
+            }
+
+            let batch = database.batch()
+            for pair in matchingPairs {
+                batch.updateData([
+                    "status": "ended",
+                    "updatedAt": FieldValue.serverTimestamp()
+                ], forDocument: pair.reference)
+            }
+            if !matchingPairs.isEmpty {
+                try await batch.commit()
+            }
+
+            let endedPairIDs = Set(matchingPairs.map(\.documentID))
+            for endedPairID in endedPairIDs {
+                beginAnalysisGeneration(pairID: endedPairID)
+                stopPreparation(pairID: endedPairID)
+                resultCache[endedPairID] = nil
+                resultLookupCompletedPairIDs.remove(endedPairID)
+                failedPreparationPairIDs.remove(endedPairID)
+            }
+            preparedKeys = preparedKeys.filter { key in
+                !endedPairIDs.contains(where: { key.hasPrefix("\($0)-") })
+            }
+            friendSummaries.removeAll { endedPairIDs.contains($0.id) }
+            if let currentActivePairID = activePairID,
+               endedPairIDs.contains(currentActivePairID) {
                 activePairID = nil
                 inviteID = ""
                 joinInviteID = ""
                 comparisonResult = nil
                 pairStatus = nil
+                pairListener?.remove()
+                pairListener = nil
+                membersListener?.remove()
+                membersListener = nil
+                resultListener?.remove()
+                resultListener = nil
             }
-            state = .succeeded(message: "연결을 해제했어요.")
+            state = .succeeded(
+                message: matchingPairs.count > 1
+                    ? "중복 연결을 포함해 이 친구와의 연결을 모두 해제했어요."
+                    : "연결을 해제했어요."
+            )
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
