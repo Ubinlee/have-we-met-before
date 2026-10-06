@@ -9,7 +9,6 @@ struct ContentView: View {
     @EnvironmentObject private var firebaseSession: FirebaseSession
     @State private var onboardingStep: OnboardingStep = .start
     @State private var activeSheet: HomeSheet?
-    @State private var lastPreparedKey = ""
 
     var body: some View {
         Group {
@@ -54,13 +53,19 @@ struct ContentView: View {
                         onManage: { activeSheet = .manage }
                     )
                     .task(id: userID) {
+                        // 분석 작업은 store가 소유하므로 사진 스캔 결과를 읽을 수 있게 연결합니다.
+                        pairing.photoAnalyzer = analyzer
                         if analyzer.canReadPhotos, analyzer.scanState == .idle {
                             await analyzer.scan()
                         }
                         await pairing.loadLatestPair(userID: userID)
                     }
-                    .task(id: "\(pairing.firstMetStatus ?? "none")-\(analyzer.scanState)-\(pairing.activePairID ?? "none")-\(pairing.analysisRunRevision)-\(pairing.activePairID.map(pairing.canStartAutomaticAnalysis) ?? false)") {
-                        await prepareAndCompareIfNeeded(userID: userID)
+                    // 실제 분석은 PairingStore가 소유한 작업에서 실행됩니다.
+                    // 이 task는 화면에 있는 동안 사진 스캔이 끝난 것 같은 변화를 알려 주기만 하므로,
+                    // 친구 상세 화면으로 이동해 취소돼도 분석은 계속됩니다.
+                    .task(id: "\(analyzer.scanState)-\(pairing.activePairID ?? "none")-\(pairing.firstMetStatus ?? "none")") {
+                        pairing.photoAnalyzer = analyzer
+                        pairing.scheduleAutomaticAnalysis()
                     }
                     .sheet(item: $activeSheet, onDismiss: {
                         // 초대/연결/기준일 화면을 닫으면 홈 목록을 서버 기준으로 다시 맞춥니다.
@@ -92,47 +97,6 @@ struct ContentView: View {
         case .manage:
             FriendManagementView(pairing: pairing, userID: userID)
         }
-    }
-
-    private func prepareAndCompareIfNeeded(userID: String) async {
-        // 저장된 결과 조회가 끝나기 전이거나 사용자가 취소한 페어는 자동으로 준비하지 않습니다.
-        guard pairing.isFirstMetDateConfirmed,
-              let pairID = pairing.activePairID,
-              let cutoff = pairing.savedFirstMetDate,
-              pairing.comparisonResult == nil,
-              pairing.canStartAutomaticAnalysis(pairID: pairID) else { return }
-
-        switch analyzer.scanState {
-        case .finished:
-            break
-        case .scanning:
-            // 스캔이 끝나면 scanState가 바뀌어 이 작업이 다시 실행됩니다.
-            return
-        case .idle, .failed:
-            if analyzer.canReadPhotos {
-                await analyzer.scan()
-            } else {
-                pairing.reportAnalysisUnavailable(
-                    pairID: pairID,
-                    message: "사진 접근 권한이 없어 기록을 준비할 수 없어요. 설정에서 사진 접근을 허용한 뒤 다시 시도해 주세요."
-                )
-            }
-            return
-        }
-
-        let key = "\(pairID)-\(cutoff.timeIntervalSince1970)-\(pairing.analysisRunRevision)"
-        guard lastPreparedKey != key else { return }
-        let prepared = await pairing.prepareVisits(
-            userID: userID,
-            events: analyzer.summary.visitEvents
-        )
-        guard prepared else {
-            // SwiftUI의 task가 화면 전환이나 상태 변경으로 취소되면 같은 분석을 다시 시작할 수 있어야 합니다.
-            // 실패한 실행을 완료로 기억하면 한 기기는 8%에, 상대는 기록 대기 상태에 계속 남습니다.
-            return
-        }
-        lastPreparedKey = key
-        await pairing.startAnalysis(userID: userID)
     }
 }
 
@@ -947,7 +911,8 @@ private struct AnalysisProgressView: View {
             ZStack {
                 Circle()
                     .stroke(AppTheme.divider, lineWidth: 6)
-                if pairing.isWaitingForRecords {
+                // 아직 아무 단계도 시작되지 않았다면 8%처럼 보이는 숫자 대신 준비 중 표시를 보여 줍니다.
+                if pairing.isWaitingForRecords || pairing.analysisProgress < 0.08 {
                     ProgressView()
                         .controlSize(.large)
                         .tint(AppTheme.primary)
@@ -1012,6 +977,8 @@ private struct FriendDetailFlowView: View {
         Group {
             if !didLoad {
                 ProgressView()
+            } else if pairing.activePairID != friend.id {
+                ProgressView("\(friend.nickname)님의 연결 정보를 다시 불러오고 있어요")
             } else if let result = pairing.comparisonResult, pairing.activePairID == friend.id {
                 ResultView(
                     result: result,
@@ -1067,6 +1034,12 @@ private struct FriendDetailFlowView: View {
             }
         }
         .task(id: friend.id) { await load() }
+        .onChange(of: pairing.activePairID) { _, activePairID in
+            // 늦게 도착한 다른 친구의 스냅숏이 전역 상태를 바꾸더라도
+            // 이 상세 화면에는 선택한 친구의 상태만 표시합니다.
+            guard didLoad, activePairID != friend.id else { return }
+            Task { await load() }
+        }
     }
 
     private func load() async {

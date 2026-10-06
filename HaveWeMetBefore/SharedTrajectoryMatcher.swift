@@ -3,7 +3,8 @@ import Foundation
 enum SharedTrajectoryMatcher {
     static func compare(
         first: [SharedVisitRecord],
-        second: [SharedVisitRecord]
+        second: [SharedVisitRecord],
+        calendar: Calendar = .autoupdatingCurrent
     ) -> [TrajectoryIntersection] {
         let secondByBucket = Dictionary(grouping: second, by: \.timeBucketIndex)
         var intersections: [TrajectoryIntersection] = []
@@ -26,6 +27,7 @@ enum SharedTrajectoryMatcher {
                 guard let strength = strength(
                     first: firstRecord,
                     second: secondRecord,
+                    calendar: calendar,
                     bucketDifference: bucketDifference,
                     distanceMeters: distance
                 ) else {
@@ -61,6 +63,7 @@ enum SharedTrajectoryMatcher {
     private static func strength(
         first: SharedVisitRecord,
         second: SharedVisitRecord,
+        calendar: Calendar,
         bucketDifference: Int,
         distanceMeters: Double
     ) -> IntersectionStrength? {
@@ -72,7 +75,7 @@ enum SharedTrajectoryMatcher {
             return .close
         }
 
-        if Calendar.autoupdatingCurrent.isDate(
+        if calendar.isDate(
             first.approximateDate,
             inSameDayAs: second.approximateDate
         ),

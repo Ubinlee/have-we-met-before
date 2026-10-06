@@ -18,6 +18,12 @@ struct FriendConnectionSummary: Identifiable, Sendable {
 final class PairingStore: ObservableObject {
     private static let recordSchemaVersion = 3
     private static let resultSchemaVersion = 4
+    /// 교차 날짜는 두 기기의 시간대와 상관없이 같은 기준으로 셉니다.
+    private static let resultCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Seoul") ?? .current
+        return calendar
+    }()
 
     enum OperationState: Equatable {
         case idle
@@ -68,8 +74,23 @@ final class PairingStore: ObservableObject {
     private var analysisGenerations: [String: Int] = [:]
     /// 페어별 비교 작업. 리스너와 자동 분석이 동시에 비교를 시작하지 않게 합니다.
     private var comparisonTasks: [String: Task<Void, Never>] = [:]
+    /// 페어별 기록 준비 작업. 화면 생명주기와 무관하게 store가 소유합니다.
+    private var preparationTasks: [String: (token: UUID, task: Task<Void, Never>)] = [:]
+    /// 이번 실행에서 준비를 마친 '페어-기준일-실행 요청' 조합.
+    private var preparedKeys: Set<String> = []
+    /// 저장된 결과를 조회하고 있는 페어. 같은 조회가 겹치지 않게 합니다.
+    private var resultLookupsInFlight: Set<String> = []
+    /// 기록 준비가 실패한 페어. 리스너가 같은 실패를 무한히 재시도하지 않도록,
+    /// 사용자가 상세 화면을 다시 열거나 '다시 분석하기'를 누를 때까지 자동 재시도를 멈춥니다.
+    private var failedPreparationPairIDs: Set<String> = []
+    private var resultListener: ListenerRegistration?
+    /// 사진 스캔 결과를 읽어 오는 곳. ContentView가 앱 시작 시 연결합니다.
+    weak var photoAnalyzer: PhotoLibraryAnalyzer?
     /// 마지막으로 연 상세 화면의 페어. 늦게 끝난 openPair가 다른 친구 화면을 덮어쓰지 않게 합니다.
     private var openingPairID: String?
+    /// 앱 시작 시 최근 연결을 찾는 비동기 조회의 식별자입니다.
+    /// 사용자가 그 사이 친구 상세를 열면 해당 조회를 무효화해 선택한 친구를 덮어쓰지 않게 합니다.
+    private var latestPairLoadToken: UUID?
 
     var isWorking: Bool { state == .working }
 
@@ -104,6 +125,8 @@ final class PairingStore: ObservableObject {
 
     func loadLatestPair(userID: String) async {
         currentUserID = userID
+        let loadToken = UUID()
+        latestPairLoadToken = loadToken
         do {
             let profile = try await database
                 .collection("users")
@@ -123,6 +146,9 @@ final class PairingStore: ObservableObject {
                 userID: userID,
                 pairs: snapshot.documents
             )
+
+            // 조회 중 사용자가 특정 친구를 열었다면 목록만 갱신하고 현재 상세 상태는 바꾸지 않습니다.
+            guard latestPairLoadToken == loadToken else { return }
 
             // 만료됐거나 내가 만들지 않은 대기 초대는 다시 불러오지 않습니다.
             // (예전에는 만료된 옛 코드가 계속 화면에 남아 친구가 입력해도 연결되지 않았습니다.)
@@ -152,11 +178,15 @@ final class PairingStore: ObservableObject {
                 pairListener = nil
                 membersListener?.remove()
                 membersListener = nil
+                resultListener?.remove()
+                resultListener = nil
                 return
             }
 
             restorePersistedCancellation(pairID: pair.documentID, userID: userID)
             resultLookupCompletedPairIDs.remove(pair.documentID)
+            // applyPair가 같은 조회를 한 번 더 시작하지 않도록 먼저 표시합니다.
+            resultLookupsInFlight.insert(pair.documentID)
             applyPair(documentID: pair.documentID, data: pair.data())
             listenToPair(documentID: pair.documentID)
             _ = await loadStoredResult(pairID: pair.documentID)
@@ -167,8 +197,12 @@ final class PairingStore: ObservableObject {
 
     func openPair(pairID: String, userID: String) async {
         currentUserID = userID
+        // 사용자가 선택한 친구가 앱 시작 시 진행 중이던 '최근 연결'보다 우선합니다.
+        latestPairLoadToken = nil
         openingPairID = pairID
         restorePersistedCancellation(pairID: pairID, userID: userID)
+        // 상세 화면을 다시 열면 이전 실패 후에도 자동으로 한 번 더 시도합니다.
+        failedPreparationPairIDs.remove(pairID)
         analysisNeedsRestart = isAnalysisCancelled(pairID)
         resultLookupCompletedPairIDs.remove(pairID)
         comparisonResult = nil
@@ -183,6 +217,7 @@ final class PairingStore: ObservableObject {
                 state = .failed(message: "연결 정보를 찾을 수 없어요.")
                 return
             }
+            resultLookupsInFlight.insert(pairID)
             applyPair(documentID: snapshot.documentID, data: data)
             listenToPair(documentID: snapshot.documentID)
             if await loadStoredResult(pairID: snapshot.documentID) { return }
@@ -451,6 +486,9 @@ final class PairingStore: ObservableObject {
             firstMetProposedBy = nil
             comparisonResult = nil
             pairStatus = "친구와 연결됐어요."
+            // 방금 만든 연결에는 저장된 결과가 있을 수 없습니다. 조회 완료로 표시해야
+            // 이후 기준일이 확정됐을 때 자동 분석이 막히지 않습니다.
+            resultLookupCompletedPairIDs.insert(pairID)
             state = .succeeded(message: "친구와 연결됐어요.")
             listenToPair(documentID: pairID)
             let myNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -537,6 +575,7 @@ final class PairingStore: ObservableObject {
             activePairID = pairID
             firstMetStatus = "confirmed"
             state = .succeeded(message: "두 사람이 기준일을 확인했어요. 기록을 자동으로 준비할게요.")
+            scheduleAutomaticAnalysis()
             return true
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -544,65 +583,156 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    @discardableResult
-    func prepareVisits(userID: String, events: [VisitEvent]) async -> Bool {
-        guard let pairID = currentPairID else {
-            state = .failed(message: "먼저 친구 초대를 만들거나 수락해 주세요.")
-            return false
+    // MARK: - 자동 분석 실행
+
+    /// 자동 분석은 화면(SwiftUI task)이 아니라 store가 소유한 작업으로 실행합니다.
+    /// 홈 화면의 task는 친구 상세 화면으로 이동하는 순간 취소되므로,
+    /// 진행 화면을 보고 있는 동안 분석이 시작되지 않거나 중간에 끊기는 문제가 있었습니다.
+    /// 상태가 바뀔 만한 곳 어디서든 호출해도 되며, 조건이 맞을 때 페어마다 한 번만 실행합니다.
+    func scheduleAutomaticAnalysis() {
+        guard let userID = currentUserID,
+              isFirstMetDateConfirmed,
+              let pairID = activePairID,
+              let cutoffDate = savedFirstMetDate,
+              comparisonResult == nil,
+              canStartAutomaticAnalysis(pairID: pairID),
+              !failedPreparationPairIDs.contains(pairID),
+              preparationTasks[pairID] == nil else { return }
+
+        // 같은 기준일·같은 실행 요청으로 이미 준비를 마쳤다면 다시 올리지 않습니다.
+        let key = "\(pairID)-\(cutoffDate.timeIntervalSince1970)-\(analysisRunRevision)"
+        guard !preparedKeys.contains(key) else { return }
+
+        let token = UUID()
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.preparationTasks[pairID]?.token == token {
+                    self.preparationTasks[pairID] = nil
+                }
+            }
+            guard let events = await self.loadVisitEvents(pairID: pairID) else { return }
+            let prepared = await self.prepareVisits(
+                pairID: pairID,
+                userID: userID,
+                events: events,
+                cutoffDate: cutoffDate
+            )
+            guard prepared else { return }
+            self.preparedKeys.insert(key)
+            await self.startAnalysis(pairID: pairID, userID: userID)
+        }
+        preparationTasks[pairID] = (token, task)
+    }
+
+    /// 사진 스캔 결과를 가져옵니다. 스캔 중이면 끝날 때까지 기다리고, 아직 안 했으면 스캔합니다.
+    private func loadVisitEvents(pairID: String) async -> [VisitEvent]? {
+        guard let analyzer = photoAnalyzer else { return nil }
+        if analyzer.scanState == .finished { return analyzer.summary.visitEvents }
+
+        guard analyzer.canReadPhotos else {
+            reportAnalysisUnavailable(
+                pairID: pairID,
+                message: "사진 접근 권한이 없어 기록을 준비할 수 없어요. 설정에서 사진 접근을 허용한 뒤 다시 시도해 주세요."
+            )
+            return nil
         }
 
+        if analyzer.scanState == .scanning {
+            while analyzer.scanState == .scanning {
+                guard !Task.isCancelled else { return nil }
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        } else {
+            await analyzer.scan()
+        }
+
+        guard analyzer.scanState == .finished else {
+            reportAnalysisUnavailable(
+                pairID: pairID,
+                message: "사진 기록을 읽지 못했어요. 다시 시도해 주세요."
+            )
+            return nil
+        }
+        return analyzer.summary.visitEvents
+    }
+
+    /// 내 흐린 방문 기록을 올리고 멤버 상태를 ready로 저장합니다.
+    /// 반환값은 '서버에 ready를 저장했는가'만 뜻합니다. 화면 반영 여부와는 관계없습니다.
+    private func prepareVisits(
+        pairID: String,
+        userID: String,
+        events: [VisitEvent],
+        cutoffDate: Date
+    ) async -> Bool {
         guard !isAnalysisCancelled(pairID) else { return false }
-
-        guard let cutoffDate = savedFirstMetDate, isFirstMetDateConfirmed else {
-            state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
-            return false
-        }
 
         // 같은 페어의 이전 준비 작업은 이 시점부터 낡은 작업이 되어 상태를 바꾸지 않습니다.
         let generation = beginAnalysisGeneration(pairID: pairID)
         let records = SharedVisitRecordBuilder.build(
             from: events.filter { $0.capturedAt < cutoffDate }
         )
-        state = .working
-        analysisProgress = max(analysisProgress, 0.18)
-        isWaitingForRecords = true
-        analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
+        if isDisplaying(pairID) {
+            state = .working
+            analysisProgress = max(analysisProgress, 0.18)
+            // 내 기기가 준비하는 중에는 '기다리는 중'이 아닙니다.
+            isWaitingForRecords = false
+            analysisMessage = "내 사진 기록을 준비하고 있어요."
+        }
 
         do {
-            try await saveMember(
-                pairID: pairID,
-                userID: userID,
-                nickname: nickname,
-                analysisStatus: "analyzing",
-                recordCount: records.count
-            )
+            async let existingVisits = visitsCollection(pairID: pairID, userID: userID)
+                .getDocuments()
+            async let ownMember = database.collection("pairs").document(pairID)
+                .collection("members").document(userID).getDocument()
+            let (existing, member) = try await (existingVisits, ownMember)
             guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
 
-            try await replaceVisits(
-                pairID: pairID,
-                userID: userID,
-                records: records,
-                generation: generation
-            )
-            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
-            if isDisplaying(pairID) {
-                analysisProgress = max(analysisProgress, 0.48)
+            let plan = visitUploadPlan(existing: existing.documents, records: records)
+            let memberData = member.data()
+            // 바뀐 기록이 없고 이미 ready로 저장돼 있으면 상태를 다시 쓰지 않습니다.
+            // analyzing으로 다시 쓰면 상대 기기의 비교가 그 순간 '준비 중'으로 읽고 멈출 수 있습니다.
+            let alreadyReady = plan.isEmpty
+                && memberIsReady(memberData)
+                && integer(from: memberData?["recordCount"]) == records.count
+
+            if !alreadyReady {
+                try await saveMember(
+                    pairID: pairID,
+                    userID: userID,
+                    nickname: memberNickname,
+                    analysisStatus: "analyzing",
+                    recordCount: records.count
+                )
+                guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
+
+                try await applyVisitUploadPlan(
+                    plan,
+                    pairID: pairID,
+                    userID: userID,
+                    generation: generation
+                )
+                guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
+                if isDisplaying(pairID) {
+                    analysisProgress = max(analysisProgress, 0.48)
+                }
+
+                try await saveMember(
+                    pairID: pairID,
+                    userID: userID,
+                    nickname: memberNickname,
+                    analysisStatus: "ready",
+                    recordCount: records.count
+                )
+                guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
             }
 
-            try await saveMember(
-                pairID: pairID,
-                userID: userID,
-                nickname: nickname,
-                analysisStatus: "ready",
-                recordCount: records.count
-            )
-            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
-
-            guard isDisplaying(pairID) else { return false }
-            uploadedRecordCount = records.count
-            analysisProgress = max(analysisProgress, 0.68)
-            analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
-            state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
+            if isDisplaying(pairID) {
+                uploadedRecordCount = records.count
+                analysisProgress = max(analysisProgress, 0.68)
+                analysisMessage = "내 사진 기록 준비가 끝났어요."
+                state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
+            }
             return true
         } catch is CancellationError {
             // 더 새로운 실행이 있으면 그 실행이 멤버 상태를 관리하므로 건드리지 않습니다.
@@ -611,22 +741,30 @@ final class PairingStore: ObservableObject {
             }
             return false
         } catch {
-            guard isCurrentGeneration(generation, pairID: pairID), isDisplaying(pairID) else { return false }
-            state = .failed(message: userFacingMessage(for: error))
+            guard isCurrentGeneration(generation, pairID: pairID) else { return false }
+            failedPreparationPairIDs.insert(pairID)
+            // analyzing으로 남기면 상대는 끝없이 기다립니다. 실패를 기록해 상대에게도 알립니다.
+            try? await saveMember(
+                pairID: pairID,
+                userID: userID,
+                nickname: memberNickname,
+                analysisStatus: "failed",
+                recordCount: 0
+            )
+            if isDisplaying(pairID) {
+                analysisNeedsRestart = true
+                analysisRestartMessage = "사진 기록을 올리지 못했어요. 네트워크 연결을 확인하고 다시 시도해 주세요."
+                analysisProgress = 0
+                isWaitingForRecords = false
+                state = .failed(message: userFacingMessage(for: error))
+            }
             return false
         }
     }
 
-    func startAnalysis(userID: String) async {
-        guard isFirstMetDateConfirmed else {
-            state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
-            return
-        }
-        guard let pairID = currentPairID,
-              !isAnalysisCancelled(pairID),
+    private func startAnalysis(pairID: String, userID: String) async {
+        guard !isAnalysisCancelled(pairID),
               resultCache[pairID] == nil else { return }
-        analysisProgress = max(analysisProgress, 0.72)
-        analysisMessage = "두 사람의 기록 상태를 확인하고 있어요."
         await compareWithFriend(pairID: pairID, userID: userID)
     }
 
@@ -723,7 +861,9 @@ final class PairingStore: ObservableObject {
             ) else {
                 if isDisplaying(pairID) {
                     isWaitingForRecords = true
-                    analysisMessage = "\(connectedFriendNickname)님의 기록 준비를 기다리고 있어요."
+                    analysisMessage = friendMemberSnapshot.data()?["analysisStatus"] as? String == "failed"
+                        ? "\(connectedFriendNickname)님 기기에서 기록 준비가 중단됐어요. 친구가 다시 분석하면 이어서 진행돼요."
+                        : "\(connectedFriendNickname)님의 기록 준비를 기다리고 있어요."
                     state = .succeeded(message: "친구의 기록 준비가 아직 끝나지 않았어요.")
                 }
                 return
@@ -750,14 +890,20 @@ final class PairingStore: ObservableObject {
             let friendRecords = friendDocuments.documents
                 .compactMap(sharedVisitRecord)
                 .filter { $0.approximateDate < cutoffDate }
+            // 두 기기가 동시에 계산해도 같은 결과를 저장하도록
+            // 비교 순서(uid가 작은 사람이 first)와 날짜 기준 시간대를 고정합니다.
+            let ownIsFirst = userID < friendID
+            let firstRecords = ownIsFirst ? ownRecords : friendRecords
+            let secondRecords = ownIsFirst ? friendRecords : ownRecords
             let intersections = SharedTrajectoryMatcher.compare(
-                first: ownRecords,
-                second: friendRecords
+                first: firstRecords,
+                second: secondRecords,
+                calendar: Self.resultCalendar
             )
 
             let result = DestinyScorer.calculate(
                 intersections: intersections,
-                calendar: .autoupdatingCurrent
+                calendar: Self.resultCalendar
             )
             guard isCurrentRun(generation, pairID: pairID) else { return }
 
@@ -765,7 +911,7 @@ final class PairingStore: ObservableObject {
                 result,
                 pairID: pairID,
                 userID: userID,
-                ownRecords: ownRecords
+                firstRecords: firstRecords
             )
             // 저장 도중 취소됐다면 이 기기 화면에는 결과를 반영하지 않습니다.
             // 서버에 남은 결과는 다음에 상세 화면을 열 때 저장 결과로 불러옵니다.
@@ -793,6 +939,7 @@ final class PairingStore: ObservableObject {
 
     func cancelAnalysis(pairID: String, userID: String) async {
         beginAnalysisGeneration(pairID: pairID)
+        stopPreparation(pairID: pairID)
         cancelledAnalysisPairIDs.insert(pairID)
         setAnalysisCancelledLocally(true, pairID: pairID, userID: userID)
         analysisNeedsRestart = true
@@ -806,6 +953,8 @@ final class PairingStore: ObservableObject {
 
     func restartAnalysis(pairID: String) {
         beginAnalysisGeneration(pairID: pairID)
+        stopPreparation(pairID: pairID)
+        failedPreparationPairIDs.remove(pairID)
         cancelledAnalysisPairIDs.remove(pairID)
         clearLocalAnalysisCancellation(pairID: pairID)
         analysisNeedsRestart = false
@@ -814,10 +963,18 @@ final class PairingStore: ObservableObject {
         analysisMessage = "사진에 남은 시간과 위치 정보를 다시 확인하고 있어요."
         state = .working
         analysisRunRevision += 1
+        scheduleAutomaticAnalysis()
+    }
+
+    /// 진행 중인 준비 작업을 멈춥니다. 세대 번호가 이미 바뀌었으므로 그 작업은 멤버 상태를 건드리지 않습니다.
+    private func stopPreparation(pairID: String) {
+        preparationTasks[pairID]?.task.cancel()
+        preparationTasks[pairID] = nil
     }
 
     /// 사진을 읽을 수 없어 기록 준비를 시작하지 못할 때 다시 시작 화면으로 돌려보냅니다.
     func reportAnalysisUnavailable(pairID: String, message: String) {
+        failedPreparationPairIDs.insert(pairID)
         guard isDisplaying(pairID), comparisonResult == nil else { return }
         analysisNeedsRestart = true
         analysisRestartMessage = message
@@ -847,32 +1004,55 @@ final class PairingStore: ObservableObject {
         try? await saveMember(
             pairID: pairID,
             userID: userID,
-            nickname: nickname,
+            nickname: memberNickname,
             analysisStatus: "notStarted",
             recordCount: 0
         )
     }
 
-    /// 방문 기록 ID는 내용의 해시라서, 바뀐 문서만 지우고 새 문서만 올립니다.
-    private func replaceVisits(
-        pairID: String,
-        userID: String,
-        records: [SharedVisitRecord],
-        generation: Int
-    ) async throws {
-        let collection = visitsCollection(pairID: pairID, userID: userID)
-        let existing = try await collection.getDocuments()
+    /// 멤버 문서에 쓰는 닉네임. 입력 중인 텍스트 필드 값이 비어 있어도 규칙에 막히지 않도록
+    /// 서버에 저장된 프로필 닉네임을 먼저 씁니다.
+    private var memberNickname: String {
+        for candidate in [savedProfileNickname, nickname] {
+            let trimmed = (candidate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return String(trimmed.prefix(20)) }
+        }
+        return "친구"
+    }
 
+    private struct VisitUploadPlan {
+        let staleDocuments: [QueryDocumentSnapshot]
+        let missingRecords: [SharedVisitRecord]
+
+        var isEmpty: Bool { staleDocuments.isEmpty && missingRecords.isEmpty }
+    }
+
+    /// 방문 기록 ID는 내용의 해시라서, 바뀐 문서만 지우고 새 문서만 올리면 됩니다.
+    private func visitUploadPlan(
+        existing: [QueryDocumentSnapshot],
+        records: [SharedVisitRecord]
+    ) -> VisitUploadPlan {
         let newIDs = Set(records.map(\.id))
         let reusableIDs = Set(
-            existing.documents
+            existing
                 .filter { integer(from: $0.data()["schemaVersion"]) == Self.recordSchemaVersion }
                 .map(\.documentID)
         )
-        let staleDocuments = existing.documents.filter { !newIDs.contains($0.documentID) }
-        let missingRecords = records.filter { !reusableIDs.contains($0.id) }
+        return VisitUploadPlan(
+            staleDocuments: existing.filter { !newIDs.contains($0.documentID) },
+            missingRecords: records.filter { !reusableIDs.contains($0.id) }
+        )
+    }
 
-        for chunk in staleDocuments.chunked(maximumCount: 400) {
+    private func applyVisitUploadPlan(
+        _ plan: VisitUploadPlan,
+        pairID: String,
+        userID: String,
+        generation: Int
+    ) async throws {
+        let collection = visitsCollection(pairID: pairID, userID: userID)
+
+        for chunk in plan.staleDocuments.chunked(maximumCount: 400) {
             guard isCurrentRun(generation, pairID: pairID), !Task.isCancelled else {
                 throw CancellationError()
             }
@@ -881,7 +1061,7 @@ final class PairingStore: ObservableObject {
             try await batch.commit()
         }
 
-        for chunk in missingRecords.chunked(maximumCount: 400) {
+        for chunk in plan.missingRecords.chunked(maximumCount: 400) {
             guard isCurrentRun(generation, pairID: pairID), !Task.isCancelled else {
                 throw CancellationError()
             }
@@ -902,7 +1082,7 @@ final class PairingStore: ObservableObject {
         _ result: DestinyScoreResult,
         pairID: String,
         userID: String,
-        ownRecords: [SharedVisitRecord]
+        firstRecords: [SharedVisitRecord]
     ) async throws {
         var data: [String: Any] = [
             "score": result.score,
@@ -928,7 +1108,7 @@ final class PairingStore: ObservableObject {
         }
 
         if let closest = result.closestIntersection,
-           let closestRecord = ownRecords.first(where: { $0.id == closest.firstRecordID }) {
+           let closestRecord = firstRecords.first(where: { $0.id == closest.firstRecordID }) {
             data["closestLevel"] = closest.strength.rawValue
             data["closestTimeBucketIndex"] = closestRecord.timeBucketIndex
             data["closestLatitudeCell"] = closestRecord.latitudeCell
@@ -945,55 +1125,26 @@ final class PairingStore: ObservableObject {
 
     @discardableResult
     private func loadStoredResult(pairID: String) async -> Bool {
+        resultLookupsInFlight.insert(pairID)
+        defer { resultLookupsInFlight.remove(pairID) }
+
         if let cached = resultCache[pairID] {
             resultLookupCompletedPairIDs.insert(pairID)
-            guard isDisplaying(pairID) else { return true }
-            comparisonResult = cached
-            clearLocalAnalysisCancellation(pairID: pairID)
-            analysisProgress = 1
-            isWaitingForRecords = false
-            analysisMessage = "분석이 완료됐어요."
-            state = .succeeded(message: "저장된 분석 결과를 열었어요.")
+            showStoredResult(cached, pairID: pairID)
             return true
         }
 
         do {
-            let snapshot = try await database.collection("pairs").document(pairID)
-                .collection("results").document("current").getDocument()
-            guard let data = snapshot.data(),
-                  integer(from: data["schemaVersion"]) == Self.resultSchemaVersion,
-                  let score = integer(from: data["score"]),
-                  let dayCount = integer(from: data["intersectionDayCount"]) else {
+            let snapshot = try await resultReference(pairID: pairID).getDocument()
+            guard let result = snapshot.data().flatMap(storedResult) else {
                 resultLookupCompletedPairIDs.insert(pairID)
-                requestAutomaticAnalysisEvaluation(pairID: pairID)
+                // 저장된 결과가 없다는 것이 확인된 시점에 바로 자동 분석을 시작합니다.
+                scheduleAutomaticAnalysis()
                 return false
             }
-
-            let rankedData = data["rankedIntersections"] as? [[String: Any]] ?? []
-            let ranked = rankedData.compactMap(storedIntersection)
-            guard score == 0 || !ranked.isEmpty else {
-                resultLookupCompletedPairIDs.insert(pairID)
-                requestAutomaticAnalysisEvaluation(pairID: pairID)
-                return false
-            }
-
-            let result = DestinyScoreResult(
-                score: score,
-                closestIntersection: ranked.first,
-                totalIntersectionDayCount: dayCount,
-                additionalIntersectionDayCount: max(0, dayCount - 1),
-                rankedIntersections: ranked
-            )
             resultCache[pairID] = result
             resultLookupCompletedPairIDs.insert(pairID)
-            clearLocalAnalysisCancellation(pairID: pairID)
-            // 조회하는 동안 다른 친구 화면으로 옮겼다면 캐시에만 넣어 둡니다.
-            guard isDisplaying(pairID) else { return true }
-            comparisonResult = result
-            analysisProgress = 1
-            isWaitingForRecords = false
-            analysisMessage = "분석이 완료됐어요."
-            state = .succeeded(message: "저장된 분석 결과를 열었어요.")
+            showStoredResult(result, pairID: pairID)
             return true
         } catch {
             resultLookupCompletedPairIDs.insert(pairID)
@@ -1004,15 +1155,60 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    /// 저장된 결과가 없다는 서버 조회가 끝난 순간 자동 준비 작업을 확실히 다시 평가합니다.
-    /// Set 변경만으로는 SwiftUI의 task 식별자가 재평가되지 않는 경우가 있어,
-    /// 두 기기 모두 기록 대기 화면에 남는 것을 막기 위해 명시적인 revision을 올립니다.
-    private func requestAutomaticAnalysisEvaluation(pairID: String) {
-        guard isDisplaying(pairID),
-              isFirstMetDateConfirmed,
-              resultCache[pairID] == nil,
-              !isAnalysisCancelled(pairID) else { return }
-        analysisRunRevision += 1
+    private func resultReference(pairID: String) -> DocumentReference {
+        database.collection("pairs").document(pairID)
+            .collection("results").document("current")
+    }
+
+    private func storedResult(from data: [String: Any]) -> DestinyScoreResult? {
+        guard integer(from: data["schemaVersion"]) == Self.resultSchemaVersion,
+              let score = integer(from: data["score"]),
+              let dayCount = integer(from: data["intersectionDayCount"]) else {
+            return nil
+        }
+
+        let rankedData = data["rankedIntersections"] as? [[String: Any]] ?? []
+        let ranked = rankedData.compactMap(storedIntersection)
+        guard score == 0 || !ranked.isEmpty else { return nil }
+
+        return DestinyScoreResult(
+            score: score,
+            closestIntersection: ranked.first,
+            totalIntersectionDayCount: dayCount,
+            additionalIntersectionDayCount: max(0, dayCount - 1),
+            rankedIntersections: ranked
+        )
+    }
+
+    /// 저장된 결과를 화면에 반영합니다. 다른 친구 화면을 보고 있다면 캐시에만 남깁니다.
+    private func showStoredResult(_ result: DestinyScoreResult, pairID: String) {
+        clearLocalAnalysisCancellation(pairID: pairID)
+        guard isDisplaying(pairID) else { return }
+        comparisonResult = result
+        analysisProgress = 1
+        isWaitingForRecords = false
+        analysisMessage = "분석이 완료됐어요."
+        state = .succeeded(message: "저장된 분석 결과를 열었어요.")
+    }
+
+    /// 상대 기기가 먼저 저장한 결과도 바로 받아, 두 기기가 같은 결과를 보여 주게 합니다.
+    private func listenToResult(pairID: String) {
+        resultListener?.remove()
+        resultListener = resultReference(pairID: pairID)
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard error == nil, let data = snapshot?.data() else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, let result = self.storedResult(from: data) else { return }
+                    self.resultCache[pairID] = result
+                    self.resultLookupCompletedPairIDs.insert(pairID)
+                    let firstMetDate = self.friendSummaries.first(where: { $0.id == pairID })?.firstMetDate
+                        ?? (self.isDisplaying(pairID) ? self.savedFirstMetDate : nil)
+                    if let firstMetDate {
+                        self.updateFriendSummary(pairID: pairID, result: result, firstMetDate: firstMetDate)
+                    }
+                    self.showStoredResult(result, pairID: pairID)
+                }
+            }
     }
 
     private func storedIntersection(_ data: [String: Any]) -> TrajectoryIntersection? {
@@ -1266,8 +1462,16 @@ final class PairingStore: ObservableObject {
             if isNewConnection {
                 connectedFriendNickname = friendSummaries.first(where: { $0.id == documentID })?.nickname ?? "친구"
             }
+            if !resultLookupCompletedPairIDs.contains(documentID),
+               !resultLookupsInFlight.contains(documentID) {
+                // 초대를 만든 쪽처럼 상세 화면을 거치지 않고 연결된 경우에도 결과 조회를 마쳐야
+                // 자동 분석을 시작할 수 있습니다.
+                resultLookupsInFlight.insert(documentID)
+                Task { await loadStoredResult(pairID: documentID) }
+            }
             if let userID = currentUserID {
                 listenToMemberReadiness(pairID: documentID, userID: userID)
+                listenToResult(pairID: documentID)
                 Task {
                     await refreshConnectedFriendNickname(pairID: documentID, userID: userID)
                     // 내가 만든 초대를 친구가 수락한 경우, 홈 목록에 새 친구가 바로 보이게 합니다.
@@ -1282,6 +1486,8 @@ final class PairingStore: ObservableObject {
             pairStatus = inviteID.isEmpty ? nil : "친구의 수락을 기다리고 있어요."
             membersListener?.remove()
             membersListener = nil
+            resultListener?.remove()
+            resultListener = nil
         default:
             activePairID = nil
             inviteID = ""
@@ -1289,6 +1495,8 @@ final class PairingStore: ObservableObject {
             pairStatus = nil
             membersListener?.remove()
             membersListener = nil
+            resultListener?.remove()
+            resultListener = nil
         }
 
         if let timestamp = data["firstMetAt"] as? Timestamp {
@@ -1315,6 +1523,9 @@ final class PairingStore: ObservableObject {
             firstMetStatus = nil
             firstMetProposedBy = nil
         }
+
+        // 다른 기기에서 기준일을 확정한 경우 등, 서버 상태 변화로 분석을 시작할 수 있게 됐는지 확인합니다.
+        scheduleAutomaticAnalysis()
     }
 
     private func refreshConnectedFriendNickname(pairID: String, userID: String) async {
@@ -1379,8 +1590,9 @@ final class PairingStore: ObservableObject {
                     guard let self else { return }
 
                     self.updateAnalysisProgressFromMembers(
-                        documents.map { $0.data() },
-                        pairID: pairID
+                        Dictionary(uniqueKeysWithValues: documents.map { ($0.documentID, $0.data()) }),
+                        pairID: pairID,
+                        userID: userID
                     )
 
                     // 멤버 문서에는 상대방에게 보여 줄 최신 닉네임도 들어 있습니다.
@@ -1390,6 +1602,9 @@ final class PairingStore: ObservableObject {
                         .data()["nickname"] as? String {
                         self.applyFriendNickname(friendNickname, pairID: pairID)
                     }
+
+                    // 앱 재실행 등으로 내 기록이 준비되지 않은 채 남아 있으면 다시 준비합니다.
+                    self.scheduleAutomaticAnalysis()
 
                     // 판단과 시작 사이에 await가 없어야 다른 스냅숏과 겹쳐 실행되지 않습니다.
                     guard self.activePairID == pairID,
@@ -1403,29 +1618,35 @@ final class PairingStore: ObservableObject {
     }
 
     private func updateAnalysisProgressFromMembers(
-        _ members: [[String: Any]],
-        pairID: String
+        _ members: [String: [String: Any]],
+        pairID: String,
+        userID: String
     ) {
         guard activePairID == pairID,
               comparisonResult == nil,
               !isAnalysisCancelled(pairID) else { return }
 
-        let statuses = members.compactMap { $0["analysisStatus"] as? String }
-        let readyCount = members.filter(memberIsReady).count
+        let ownData = members[userID]
+        let friendData = members.first(where: { $0.key != userID })?.value
+        let ownReady = memberIsReady(ownData)
+        let friendReady = memberIsReady(friendData)
 
-        if readyCount == 2 {
+        if ownReady && friendReady {
             analysisProgress = max(analysisProgress, 0.76)
             isWaitingForRecords = false
             analysisMessage = "두 사람의 기록 비교를 준비하고 있어요."
-        } else if readyCount == 1 {
+        } else if ownReady {
+            // 내 준비는 끝났고 상대를 기다리는 경우에만 '기다리는 중'으로 표시합니다.
             // 상대가 취소해 준비 완료 인원이 줄면 진행률도 함께 낮춥니다.
             analysisProgress = min(max(analysisProgress, 0.58), 0.7)
             isWaitingForRecords = true
-            analysisMessage = "한 사람의 기록 준비가 끝났어요. 나머지 기록을 기다리고 있어요."
-        } else if statuses.contains("analyzing") {
-            analysisProgress = min(max(analysisProgress, 0.25), 0.7)
+            analysisMessage = friendData?["analysisStatus"] as? String == "failed"
+                ? "\(connectedFriendNickname)님 기기에서 기록 준비가 중단됐어요. 친구가 다시 분석하면 이어서 진행돼요."
+                : "내 기록 준비가 끝났어요. \(connectedFriendNickname)님의 기록을 기다리고 있어요."
+        } else {
+            // 내 기록은 이 기기의 준비 작업이 진행률을 올립니다. 여기서는 상한만 맞춥니다.
+            analysisProgress = min(analysisProgress, 0.7)
             isWaitingForRecords = false
-            analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
         }
     }
 
