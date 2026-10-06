@@ -945,9 +945,8 @@ final class PairingStore: ObservableObject {
 
     @discardableResult
     private func loadStoredResult(pairID: String) async -> Bool {
-        defer { resultLookupCompletedPairIDs.insert(pairID) }
-
         if let cached = resultCache[pairID] {
+            resultLookupCompletedPairIDs.insert(pairID)
             guard isDisplaying(pairID) else { return true }
             comparisonResult = cached
             clearLocalAnalysisCancellation(pairID: pairID)
@@ -965,12 +964,18 @@ final class PairingStore: ObservableObject {
                   integer(from: data["schemaVersion"]) == Self.resultSchemaVersion,
                   let score = integer(from: data["score"]),
                   let dayCount = integer(from: data["intersectionDayCount"]) else {
+                resultLookupCompletedPairIDs.insert(pairID)
+                requestAutomaticAnalysisEvaluation(pairID: pairID)
                 return false
             }
 
             let rankedData = data["rankedIntersections"] as? [[String: Any]] ?? []
             let ranked = rankedData.compactMap(storedIntersection)
-            guard score == 0 || !ranked.isEmpty else { return false }
+            guard score == 0 || !ranked.isEmpty else {
+                resultLookupCompletedPairIDs.insert(pairID)
+                requestAutomaticAnalysisEvaluation(pairID: pairID)
+                return false
+            }
 
             let result = DestinyScoreResult(
                 score: score,
@@ -980,6 +985,7 @@ final class PairingStore: ObservableObject {
                 rankedIntersections: ranked
             )
             resultCache[pairID] = result
+            resultLookupCompletedPairIDs.insert(pairID)
             clearLocalAnalysisCancellation(pairID: pairID)
             // 조회하는 동안 다른 친구 화면으로 옮겼다면 캐시에만 넣어 둡니다.
             guard isDisplaying(pairID) else { return true }
@@ -990,11 +996,23 @@ final class PairingStore: ObservableObject {
             state = .succeeded(message: "저장된 분석 결과를 열었어요.")
             return true
         } catch {
+            resultLookupCompletedPairIDs.insert(pairID)
             if isDisplaying(pairID) {
                 state = .failed(message: userFacingMessage(for: error))
             }
             return false
         }
+    }
+
+    /// 저장된 결과가 없다는 서버 조회가 끝난 순간 자동 준비 작업을 확실히 다시 평가합니다.
+    /// Set 변경만으로는 SwiftUI의 task 식별자가 재평가되지 않는 경우가 있어,
+    /// 두 기기 모두 기록 대기 화면에 남는 것을 막기 위해 명시적인 revision을 올립니다.
+    private func requestAutomaticAnalysisEvaluation(pairID: String) {
+        guard isDisplaying(pairID),
+              isFirstMetDateConfirmed,
+              resultCache[pairID] == nil,
+              !isAnalysisCancelled(pairID) else { return }
+        analysisRunRevision += 1
     }
 
     private func storedIntersection(_ data: [String: Any]) -> TrajectoryIntersection? {
