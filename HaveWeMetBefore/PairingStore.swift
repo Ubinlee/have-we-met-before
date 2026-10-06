@@ -544,17 +544,18 @@ final class PairingStore: ObservableObject {
         }
     }
 
-    func prepareVisits(userID: String, events: [VisitEvent]) async {
+    @discardableResult
+    func prepareVisits(userID: String, events: [VisitEvent]) async -> Bool {
         guard let pairID = currentPairID else {
             state = .failed(message: "먼저 친구 초대를 만들거나 수락해 주세요.")
-            return
+            return false
         }
 
-        guard !isAnalysisCancelled(pairID) else { return }
+        guard !isAnalysisCancelled(pairID) else { return false }
 
         guard let cutoffDate = savedFirstMetDate, isFirstMetDateConfirmed else {
             state = .failed(message: "친구와 기준일을 먼저 확인해 주세요.")
-            return
+            return false
         }
 
         // 같은 페어의 이전 준비 작업은 이 시점부터 낡은 작업이 되어 상태를 바꾸지 않습니다.
@@ -575,7 +576,7 @@ final class PairingStore: ObservableObject {
                 analysisStatus: "analyzing",
                 recordCount: records.count
             )
-            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return }
+            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
 
             try await replaceVisits(
                 pairID: pairID,
@@ -583,7 +584,7 @@ final class PairingStore: ObservableObject {
                 records: records,
                 generation: generation
             )
-            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return }
+            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
             if isDisplaying(pairID) {
                 analysisProgress = max(analysisProgress, 0.48)
             }
@@ -595,21 +596,24 @@ final class PairingStore: ObservableObject {
                 analysisStatus: "ready",
                 recordCount: records.count
             )
-            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return }
+            guard await continueAnalysis(pairID: pairID, userID: userID, generation: generation) else { return false }
 
-            guard isDisplaying(pairID) else { return }
+            guard isDisplaying(pairID) else { return false }
             uploadedRecordCount = records.count
             analysisProgress = max(analysisProgress, 0.68)
             analysisMessage = "두 사람의 사진 기록을 준비하고 있어요."
             state = .succeeded(message: "분석 준비가 완료됐어요. 흐린 방문 기록 \(records.count)개를 준비했어요.")
+            return true
         } catch is CancellationError {
             // 더 새로운 실행이 있으면 그 실행이 멤버 상태를 관리하므로 건드리지 않습니다.
             if isCurrentGeneration(generation, pairID: pairID) {
                 await markMemberAnalysisCancelled(pairID: pairID, userID: userID)
             }
+            return false
         } catch {
-            guard isCurrentGeneration(generation, pairID: pairID), isDisplaying(pairID) else { return }
+            guard isCurrentGeneration(generation, pairID: pairID), isDisplaying(pairID) else { return false }
             state = .failed(message: userFacingMessage(for: error))
+            return false
         }
     }
 

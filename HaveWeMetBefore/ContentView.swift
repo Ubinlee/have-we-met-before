@@ -122,8 +122,16 @@ struct ContentView: View {
 
         let key = "\(pairID)-\(cutoff.timeIntervalSince1970)-\(pairing.analysisRunRevision)"
         guard lastPreparedKey != key else { return }
+        let prepared = await pairing.prepareVisits(
+            userID: userID,
+            events: analyzer.summary.visitEvents
+        )
+        guard prepared else {
+            // SwiftUI의 task가 화면 전환이나 상태 변경으로 취소되면 같은 분석을 다시 시작할 수 있어야 합니다.
+            // 실패한 실행을 완료로 기억하면 한 기기는 8%에, 상대는 기록 대기 상태에 계속 남습니다.
+            return
+        }
         lastPreparedKey = key
-        await pairing.prepareVisits(userID: userID, events: analyzer.summary.visitEvents)
         await pairing.startAnalysis(userID: userID)
     }
 }
