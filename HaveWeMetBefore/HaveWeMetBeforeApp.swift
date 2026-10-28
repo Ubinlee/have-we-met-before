@@ -1,3 +1,4 @@
+import FirebaseAnalytics
 import FirebaseCore
 import SwiftUI
 
@@ -7,6 +8,12 @@ struct HaveWeMetBeforeApp: App {
 
     init() {
         FirebaseApp.configure()
+        Analytics.setAnalyticsCollectionEnabled(true)
+#if DEBUG
+        Analytics.logEvent("analytics_connection_check", parameters: [
+            "source": "xcode_debug"
+        ])
+#endif
         _firebaseSession = StateObject(wrappedValue: FirebaseSession())
     }
 

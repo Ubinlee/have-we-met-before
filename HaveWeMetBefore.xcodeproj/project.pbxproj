@@ -10,6 +10,7 @@
 		B20000000000000000000001 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000004 /* FirebaseCore */; };
 		B20000000000000000000002 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000005 /* FirebaseAuth */; };
 		B20000000000000000000003 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000006 /* FirebaseFirestore */; };
+		B20000000000000000000008 /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000009 /* FirebaseAnalytics */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +33,7 @@
 				B20000000000000000000001 /* FirebaseCore in Frameworks */,
 				B20000000000000000000002 /* FirebaseAuth in Frameworks */,
 				B20000000000000000000003 /* FirebaseFirestore in Frameworks */,
+				B20000000000000000000008 /* FirebaseAnalytics in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,6 +79,7 @@
 				B20000000000000000000004 /* FirebaseCore */,
 				B20000000000000000000005 /* FirebaseAuth */,
 				B20000000000000000000006 /* FirebaseFirestore */,
+				B20000000000000000000009 /* FirebaseAnalytics */,
 			);
 			productName = HaveWeMetBefore;
 			productReference = A10000000000000000000001 /* HaveWeMetBefore.app */;
@@ -233,7 +236,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 17;
+				CURRENT_PROJECT_VERSION = 18;
 				DEVELOPMENT_TEAM = 7D897W4SN5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -259,7 +262,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 17;
+				CURRENT_PROJECT_VERSION = 18;
 				DEVELOPMENT_TEAM = 7D897W4SN5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -328,6 +331,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B20000000000000000000007 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFirestore;
+		};
+		B20000000000000000000009 /* FirebaseAnalytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B20000000000000000000007 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAnalytics;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

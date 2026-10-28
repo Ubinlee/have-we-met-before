@@ -816,7 +816,7 @@ private struct FirstMetDateConfirmationView: View {
                         .font(.system(size: 20, weight: .bold))
                 }
                 .padding(.top, 32)
-                Text("날짜가 다르면 수정해서 다시 확인을 요청할 수 있어요. 결과가 나온 뒤에는 기준일을 바꿀 수 없어요.")
+                Text("날짜가 다르면 수정해서 다시 확인을 요청할 수 있어요. 기준일을 바꾸면 기존 결과는 사라지고 다시 분석해요.")
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.secondaryText)
                     .padding(.top, 24)
@@ -972,6 +972,7 @@ private struct FriendDetailFlowView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var didLoad = false
     @State private var loadError: String?
+    @State private var isEditingFirstMetDate = false
 
     var body: some View {
         Group {
@@ -979,12 +980,18 @@ private struct FriendDetailFlowView: View {
                 ProgressView()
             } else if pairing.activePairID != friend.id {
                 ProgressView("\(friend.nickname)님의 연결 정보를 다시 불러오고 있어요")
+            } else if isEditingFirstMetDate {
+                FirstMetDateEntryView(pairing: pairing, pairID: friend.id, userID: userID) {
+                    isEditingFirstMetDate = false
+                }
             } else if let result = pairing.comparisonResult, pairing.activePairID == friend.id {
                 ResultView(
                     result: result,
                     firstMetDate: pairing.savedFirstMetDate ?? friend.firstMetDate ?? Date(),
                     firstNickname: pairing.nickname,
-                    secondNickname: pairing.connectedFriendNickname
+                    secondNickname: pairing.connectedFriendNickname,
+                    onEditFirstMetDate: { isEditingFirstMetDate = true },
+                    onHome: { dismiss() }
                 )
             } else if let loadError {
                 // 연결 정보를 불러오지 못했을 때만 오류 화면을 보여 줍니다.

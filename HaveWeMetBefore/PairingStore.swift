@@ -577,6 +577,7 @@ final class PairingStore: ObservableObject {
         state = .working
         // 기준일이 바뀌면 이전 기준일로 진행 중이던 비교와 저장 결과는 더 이상 유효하지 않습니다.
         beginAnalysisGeneration(pairID: pairID)
+        stopPreparation(pairID: pairID)
 
         do {
             let pairReference = database.collection("pairs").document(pairID)
@@ -598,8 +599,17 @@ final class PairingStore: ObservableObject {
             firstMetStatus = "pending"
             firstMetProposedBy = userID
             uploadedRecordCount = 0
-            comparisonResult = nil
-            resultCache[pairID] = nil
+            clearStoredResultState(
+                pairID: pairID,
+                firstMetDate: normalizedDate,
+                firstMetStatus: "pending"
+            )
+            resultLookupCompletedPairIDs.insert(pairID)
+            failedPreparationPairIDs.remove(pairID)
+            cancelledAnalysisPairIDs.remove(pairID)
+            clearLocalAnalysisCancellation(pairID: pairID)
+            preparedKeys = Set(preparedKeys.filter { !$0.hasPrefix("\(pairID)-") })
+            analysisNeedsRestart = false
             analysisProgress = 0
             state = .succeeded(message: "기준일을 제안했어요. 친구의 확인을 기다리고 있어요.")
             return true
@@ -971,7 +981,8 @@ final class PairingStore: ObservableObject {
                 result,
                 pairID: pairID,
                 userID: userID,
-                firstRecords: firstRecords
+                firstRecords: firstRecords,
+                cutoffDate: cutoffDate
             )
             // 저장 도중 취소됐다면 이 기기 화면에는 결과를 반영하지 않습니다.
             // 서버에 남은 결과는 다음에 상세 화면을 열 때 저장 결과로 불러옵니다.
@@ -991,6 +1002,11 @@ final class PairingStore: ObservableObject {
                     ? "겹치는 기록을 찾지 못했어요."
                     : "두 사람의 흐린 기록 비교를 완료했어요."
             )
+        } catch let error as NSError
+            where error.domain == "PairingStore.Analysis" && error.code == 1 {
+            // 다른 기기에서 기준일을 바꾼 사이 끝난 이전 분석입니다.
+            // 새 기준일 상태는 pair 리스너가 이어서 반영하므로 오류 화면을 띄우지 않습니다.
+            return
         } catch {
             guard isCurrentRun(generation, pairID: pairID), isDisplaying(pairID) else { return }
             state = .failed(message: userFacingMessage(for: error))
@@ -1162,7 +1178,8 @@ final class PairingStore: ObservableObject {
         _ result: DestinyScoreResult,
         pairID: String,
         userID: String,
-        firstRecords: [SharedVisitRecord]
+        firstRecords: [SharedVisitRecord],
+        cutoffDate: Date
     ) async throws {
         var data: [String: Any] = [
             "score": result.score,
@@ -1195,12 +1212,33 @@ final class PairingStore: ObservableObject {
             data["closestLongitudeCell"] = closestRecord.longitudeCell
         }
 
-        try await database
-            .collection("pairs")
-            .document(pairID)
-            .collection("results")
-            .document("current")
-            .setData(data)
+        let pairReference = database.collection("pairs").document(pairID)
+        let resultReference = pairReference.collection("results").document("current")
+
+        // 기준일 변경과 결과 저장이 동시에 일어나도 이전 기준일 결과가 되살아나지 않게 합니다.
+        // 트랜잭션이 pair 문서를 먼저 읽으므로, 기준일이 바뀌면 자동 재시도 후 저장을 중단합니다.
+        _ = try await database.runTransaction { transaction, errorPointer -> Any? in
+            do {
+                let pairSnapshot = try transaction.getDocument(pairReference)
+                guard let pairData = pairSnapshot.data(),
+                      pairData["status"] as? String == "active",
+                      pairData["firstMetStatus"] as? String == "confirmed",
+                      let serverCutoff = (pairData["firstMetAt"] as? Timestamp)?.dateValue(),
+                      abs(serverCutoff.timeIntervalSince(cutoffDate)) < 1 else {
+                    errorPointer?.pointee = NSError(
+                        domain: "PairingStore.Analysis",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "기준일이 변경되어 이전 분석 결과를 저장하지 않았어요."]
+                    )
+                    return nil
+                }
+                transaction.setData(data, forDocument: resultReference)
+                return true
+            } catch {
+                errorPointer?.pointee = error as NSError
+                return nil
+            }
+        }
     }
 
     @discardableResult
@@ -1215,7 +1253,7 @@ final class PairingStore: ObservableObject {
         }
 
         do {
-            let snapshot = try await resultReference(pairID: pairID).getDocument()
+            let snapshot = try await resultReference(pairID: pairID).getDocument(source: .server)
             guard let result = snapshot.data().flatMap(storedResult) else {
                 resultLookupCompletedPairIDs.insert(pairID)
                 // 저장된 결과가 없다는 것이 확인된 시점에 바로 자동 분석을 시작합니다.
@@ -1276,9 +1314,19 @@ final class PairingStore: ObservableObject {
         resultListener?.remove()
         resultListener = resultReference(pairID: pairID)
             .addSnapshotListener { [weak self] snapshot, error in
-                guard error == nil, let data = snapshot?.data() else { return }
+                guard error == nil, let snapshot else { return }
                 Task { @MainActor [weak self] in
-                    guard let self, let result = self.storedResult(from: data) else { return }
+                    guard let self else { return }
+                    guard let data = snapshot.data(),
+                          let result = self.storedResult(from: data) else {
+                        self.clearStoredResultState(
+                            pairID: pairID,
+                            firstMetDate: self.savedFirstMetDate,
+                            firstMetStatus: self.firstMetStatus
+                        )
+                        self.resultLookupCompletedPairIDs.insert(pairID)
+                        return
+                    }
                     self.resultCache[pairID] = result
                     self.resultLookupCompletedPairIDs.insert(pairID)
                     let firstMetDate = self.friendSummaries.first(where: { $0.id == pairID })?.firstMetDate
@@ -1588,16 +1636,31 @@ final class PairingStore: ObservableObject {
             if dateChanged || returnedToPending {
                 // 다른 기기에서 기준일을 수정해도 이전 기준일로 돌던 비교가 결과를 저장하지 않게 합니다.
                 beginAnalysisGeneration(pairID: documentID)
-                resultCache[documentID] = nil
+                stopPreparation(pairID: documentID)
+                preparedKeys = Set(preparedKeys.filter { !$0.hasPrefix("\(documentID)-") })
+                failedPreparationPairIDs.remove(documentID)
+                cancelledAnalysisPairIDs.remove(documentID)
+                clearLocalAnalysisCancellation(pairID: documentID)
+                resultLookupCompletedPairIDs.insert(documentID)
                 if isDisplaying(documentID) {
-                    comparisonResult = nil
-                    resetAnalysisProgress()
+                    analysisNeedsRestart = false
                 }
+                clearStoredResultState(
+                    pairID: documentID,
+                    firstMetDate: date,
+                    firstMetStatus: nextFirstMetStatus
+                )
             }
             firstMetDate = date
             savedFirstMetDate = date
             firstMetStatus = nextFirstMetStatus
             firstMetProposedBy = data["firstMetProposedBy"] as? String
+            updateFriendSummaryFirstMetState(
+                pairID: documentID,
+                firstMetDate: date,
+                firstMetStatus: nextFirstMetStatus,
+                clearResult: dateChanged || nextFirstMetStatus == "pending"
+            )
         } else {
             savedFirstMetDate = nil
             firstMetStatus = nil
@@ -1935,6 +1998,52 @@ final class PairingStore: ObservableObject {
             firstMetStatus: "confirmed",
             hasStoredResult: true,
             isReady: true
+        )
+        friendSummaries.sort {
+            switch ($0.score, $1.score) {
+            case let (left?, right?): left > right
+            case (_?, nil): true
+            case (nil, _?): false
+            case (nil, nil): $0.nickname < $1.nickname
+            }
+        }
+    }
+
+    private func clearStoredResultState(
+        pairID: String,
+        firstMetDate: Date?,
+        firstMetStatus: String?
+    ) {
+        resultCache[pairID] = nil
+        updateFriendSummaryFirstMetState(
+            pairID: pairID,
+            firstMetDate: firstMetDate,
+            firstMetStatus: firstMetStatus,
+            clearResult: true
+        )
+        guard isDisplaying(pairID) else { return }
+        comparisonResult = nil
+        resetAnalysisProgress()
+    }
+
+    private func updateFriendSummaryFirstMetState(
+        pairID: String,
+        firstMetDate: Date?,
+        firstMetStatus: String?,
+        clearResult: Bool
+    ) {
+        guard let index = friendSummaries.firstIndex(where: { $0.id == pairID }) else { return }
+        let previous = friendSummaries[index]
+        friendSummaries[index] = FriendConnectionSummary(
+            id: previous.id,
+            nickname: previous.nickname,
+            score: clearResult ? nil : previous.score,
+            intersectionDayCount: clearResult ? 0 : previous.intersectionDayCount,
+            closestStrength: clearResult ? nil : previous.closestStrength,
+            firstMetDate: firstMetDate,
+            firstMetStatus: firstMetStatus,
+            hasStoredResult: clearResult ? false : previous.hasStoredResult,
+            isReady: previous.isReady
         )
         friendSummaries.sort {
             switch ($0.score, $1.score) {

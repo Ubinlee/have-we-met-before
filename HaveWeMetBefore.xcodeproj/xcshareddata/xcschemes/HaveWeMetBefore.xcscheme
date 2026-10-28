@@ -12,6 +12,9 @@
       <BuildableProductRunnable runnableDebuggingMode="0">
          <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000006" BuildableName="HaveWeMetBefore.app" BlueprintName="HaveWeMetBefore" ReferencedContainer="container:HaveWeMetBefore.xcodeproj"/>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+         <CommandLineArgument argument="-FIRAnalyticsDebugEnabled" isEnabled="YES"/>
+      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
       <BuildableProductRunnable runnableDebuggingMode="0">

@@ -162,7 +162,8 @@ private enum PhotoLibraryScanner {
         // it was captured. Camera photos are added immediately; received or
         // imported originals usually retain an older capture date.
         if #available(iOS 26.0, *) {
-            let additionDelay = asset.addedDate.timeIntervalSince(capturedAt)
+            guard let addedDate = asset.addedDate else { return false }
+            let additionDelay = addedDate.timeIntervalSince(capturedAt)
             return additionDelay >= -5 && additionDelay <= 60
         }
 

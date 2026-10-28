@@ -1,13 +1,19 @@
 import MapKit
 import SwiftUI
+import UIKit
 
 struct ResultView: View {
     let result: DestinyScoreResult
     let firstMetDate: Date
     var firstNickname: String = "나"
     var secondNickname: String = "친구"
+    var onEditFirstMetDate: (() -> Void)?
+    var onHome: (() -> Void)?
     @State private var placeNames: [String: String] = [:]
     @State private var selectedMatchID: String?
+    @State private var shareItems: [Any] = []
+    @State private var isShareSheetPresented = false
+    @State private var shareErrorMessage: String?
 
     private var matches: [TrajectoryIntersection] { result.rankedIntersections }
 
@@ -21,11 +27,18 @@ struct ResultView: View {
                     } else {
                         emptyResult
                     }
-                    ShareLink(item: shareText) {
-                        Text("공유하기")
+                    Button("공유하기") {
+                        prepareShare()
                     }
                     .buttonStyle(PrimaryActionButtonStyle())
-                    Text("홈으로")
+                    if let onEditFirstMetDate {
+                        Button("기준일 변경하기", action: onEditFirstMetDate)
+                            .buttonStyle(SecondaryActionButtonStyle())
+                    }
+                    Button("홈으로") {
+                        onHome?()
+                    }
+                    .buttonStyle(.plain)
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(AppTheme.secondaryText)
                         .frame(maxWidth: .infinity)
@@ -37,6 +50,17 @@ struct ResultView: View {
         }
         .background(AppTheme.background)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $isShareSheetPresented) {
+            ShareSheet(items: shareItems)
+        }
+        .alert("공유 카드를 만들지 못했어요", isPresented: Binding(
+            get: { shareErrorMessage != nil },
+            set: { if !$0 { shareErrorMessage = nil } }
+        )) {
+            Button("확인", role: .cancel) {}
+        } message: {
+            Text(shareErrorMessage ?? "잠시 후 다시 시도해 주세요.")
+        }
         .task(id: matches.map(\.id)) {
             if !matches.contains(where: { $0.id == selectedMatchID }) {
                 selectedMatchID = matches.first?.id
@@ -84,25 +108,11 @@ struct ResultView: View {
     }
 
     private func timeline(first: TrajectoryIntersection) -> some View {
-        VStack(alignment: .leading, spacing: 28) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("가장 가까웠던 날")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(AppTheme.primary)
-                momentRow(first, showsContinuation: matches.count > 1)
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            momentRow(first, showsContinuation: matches.count > 1)
 
-            if matches.count > 1 {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("다른 순간들")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AppTheme.primary)
-                    VStack(spacing: 0) {
-                        ForEach(Array(matches.dropFirst().enumerated()), id: \.element.id) { index, match in
-                            momentRow(match, showsContinuation: index < matches.count - 2)
-                        }
-                    }
-                }
+            ForEach(Array(matches.dropFirst().enumerated()), id: \.element.id) { index, match in
+                momentRow(match, showsContinuation: index < matches.count - 2)
             }
         }
     }
@@ -116,10 +126,11 @@ struct ResultView: View {
         return HStack(alignment: .top, spacing: 14) {
             VStack(spacing: 4) {
                 Circle()
-                    .fill(AppTheme.background)
+                    .fill(expanded ? AppTheme.primary : AppTheme.background)
                     .stroke(AppTheme.primary, lineWidth: 2)
                     .frame(width: 10, height: 10)
                     .padding(.top, 5)
+                    .animation(.easeInOut(duration: 0.22), value: expanded)
                 if showsContinuation {
                     Rectangle()
                         .fill(AppTheme.divider)
@@ -252,6 +263,34 @@ struct ResultView: View {
         "\(firstNickname)와 \(secondNickname)는 \(result.relationshipLabel)! 운명지수 \(result.score)점 #본적있나"
     }
 
+    @MainActor
+    private func prepareShare() {
+        let card = ResultShareCard(
+            firstNickname: firstNickname,
+            secondNickname: secondNickname,
+            relationshipLabel: result.relationshipLabel,
+            score: result.score,
+            message: heroMessage
+        )
+        let renderer = ImageRenderer(content: card)
+        renderer.scale = 3
+
+        guard let image = renderer.uiImage, let data = image.pngData() else {
+            shareErrorMessage = "이미지 생성에 실패했어요."
+            return
+        }
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("have-we-met-result.png")
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            shareItems = [fileURL, shareText]
+            isShareSheetPresented = true
+        } catch {
+            shareErrorMessage = "이미지 파일을 저장하지 못했어요."
+        }
+    }
+
     private func timeText(_ seconds: TimeInterval) -> String {
         let hours = Int(seconds) / 3_600
         let minutes = (Int(seconds) % 3_600) / 60
@@ -272,4 +311,80 @@ struct ResultView: View {
         formatter.dateFormat = "yyyy년 M월 d일"
         return formatter
     }()
+}
+
+private struct ResultShareCard: View {
+    let firstNickname: String
+    let secondNickname: String
+    let relationshipLabel: String
+    let score: Int
+    let message: String
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [AppTheme.primary, Color(red: 155 / 255, green: 134 / 255, blue: 240 / 255)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack(spacing: 0) {
+                Text("본 적 있나?")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.75))
+
+                Spacer()
+
+                Text("\(firstNickname) × \(secondNickname)")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                Text(relationshipLabel)
+                    .font(.system(size: 27, weight: .bold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 10)
+
+                ZStack {
+                    Circle().stroke(.white.opacity(0.25), lineWidth: 11)
+                    Circle()
+                        .trim(from: 0, to: CGFloat(score) / 100)
+                        .stroke(.white, style: StrokeStyle(lineWidth: 11, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    VStack(spacing: 1) {
+                        Text("\(score)")
+                            .font(.system(size: 56, weight: .bold, design: .rounded))
+                        Text("운명지수")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.white)
+                }
+                .frame(width: 184, height: 184)
+                .padding(.vertical, 30)
+
+                Text(message)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .multilineTextAlignment(.center)
+
+                Spacer()
+
+                Text("정확한 위치와 사진은 공유하지 않아요")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+            .padding(.vertical, 28)
+            .padding(.horizontal, 24)
+        }
+        .frame(width: 360, height: 450)
+    }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
