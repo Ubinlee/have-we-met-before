@@ -14,6 +14,7 @@ struct ResultView: View {
     @State private var shareItems: [Any] = []
     @State private var isShareSheetPresented = false
     @State private var shareErrorMessage: String?
+    @State private var didLogResultView = false
 
     private var matches: [TrajectoryIntersection] { result.rankedIntersections }
 
@@ -51,7 +52,11 @@ struct ResultView: View {
         .background(AppTheme.background)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $isShareSheetPresented) {
-            ShareSheet(items: shareItems)
+            ShareSheet(items: shareItems) { activityType in
+                AnalyticsTracker.log("result_share_completed", parameters: [
+                    "activity_type": activityType ?? "unknown"
+                ])
+            }
         }
         .alert("공유 카드를 만들지 못했어요", isPresented: Binding(
             get: { shareErrorMessage != nil },
@@ -60,6 +65,15 @@ struct ResultView: View {
             Button("확인", role: .cancel) {}
         } message: {
             Text(shareErrorMessage ?? "잠시 후 다시 시도해 주세요.")
+        }
+        .onAppear {
+            guard !didLogResultView else { return }
+            didLogResultView = true
+            AnalyticsTracker.log("result_viewed", parameters: [
+                "relationship_label": AnalyticsTracker.relationshipLabel(result.relationshipLabel),
+                "score_bucket": AnalyticsTracker.scoreBucket(result.score),
+                "entry_point": "friend_detail"
+            ])
         }
         .task(id: matches.map(\.id)) {
             if !matches.contains(where: { $0.id == selectedMatchID }) {
@@ -141,6 +155,8 @@ struct ResultView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Button {
+                    let rank = (matches.firstIndex(where: { $0.id == match.id }) ?? 0) + 1
+                    AnalyticsTracker.log("result_moment_selected", parameters: ["rank": rank])
                     withAnimation(.easeInOut(duration: 0.22)) {
                         selectedMatchID = match.id
                     }
@@ -212,6 +228,15 @@ struct ResultView: View {
         .mapStyle(.standard(pointsOfInterest: .excludingAll))
         .frame(height: 169)
         .clipShape(RoundedRectangle(cornerRadius: 9))
+        .simultaneousGesture(
+            MagnifyGesture().onEnded { _ in
+                let rank = (matches.firstIndex(where: { $0.id == match.id }) ?? 0) + 1
+                AnalyticsTracker.log("result_map_interacted", parameters: [
+                    "rank": rank,
+                    "action": "zoom"
+                ])
+            }
+        )
         .id(match.id)
     }
 
@@ -265,6 +290,10 @@ struct ResultView: View {
 
     @MainActor
     private func prepareShare() {
+        AnalyticsTracker.log("result_share_started", parameters: [
+            "relationship_label": AnalyticsTracker.relationshipLabel(result.relationshipLabel),
+            "score_bucket": AnalyticsTracker.scoreBucket(result.score)
+        ])
         let card = ResultShareCard(
             firstNickname: firstNickname,
             secondNickname: secondNickname,
@@ -381,9 +410,15 @@ private struct ResultShareCard: View {
 
 private struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
+    let onComplete: (String?) -> Void
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.completionWithItemsHandler = { activityType, completed, _, _ in
+            guard completed else { return }
+            onComplete(activityType?.rawValue)
+        }
+        return controller
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}

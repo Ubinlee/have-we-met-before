@@ -53,20 +53,28 @@ final class PhotoLibraryAnalyzer: ObservableObject {
     }
 
     func requestAccessAndScan() async {
+        AnalyticsTracker.log("photo_permission_requested", parameters: [
+            "current_status": AnalyticsTracker.permissionStatus(authorizationStatus)
+        ])
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         authorizationStatus = status
+        AnalyticsTracker.log("photo_permission_result", parameters: [
+            "status": AnalyticsTracker.permissionStatus(status)
+        ])
 
         guard canReadPhotos else {
             scanState = .idle
             return
         }
 
-        await scan()
+        await scan(trigger: "onboarding")
     }
 
-    func scan() async {
+    func scan(trigger: String = "automatic") async {
         guard canReadPhotos else { return }
 
+        let startedAt = Date()
+        AnalyticsTracker.log("photo_scan_started", parameters: ["trigger": trigger])
         scanState = .scanning
         let result = await Task.detached(priority: .userInitiated) {
             PhotoLibraryScanner.scan()
@@ -74,6 +82,10 @@ final class PhotoLibraryAnalyzer: ObservableObject {
 
         summary = result
         scanState = .finished
+        AnalyticsTracker.log("photo_scan_completed", parameters: [
+            "record_count_bucket": AnalyticsTracker.recordCountBucket(result.visitEvents.count),
+            "duration_bucket": AnalyticsTracker.durationBucket(Date().timeIntervalSince(startedAt))
+        ])
     }
 }
 

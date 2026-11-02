@@ -10,6 +10,8 @@ struct FriendConnectionSummary: Identifiable, Sendable {
     let closestStrength: IntersectionStrength?
     let firstMetDate: Date?
     let firstMetStatus: String?
+    let firstMetProposedBy: String?
+    let updatedAt: Date?
     let hasStoredResult: Bool
     let isReady: Bool
 }
@@ -34,7 +36,13 @@ final class PairingStore: ObservableObject {
 
     @Published var nickname = ""
     @Published var inviteID = ""
-    @Published var joinInviteID = ""
+    @Published var joinInviteID = "" {
+        didSet {
+            if !isApplyingInviteCodeProgrammatically {
+                joinInviteCodeSource = "manual"
+            }
+        }
+    }
     @Published var firstMetDate = Calendar.current.startOfDay(for: Date())
     @Published private(set) var activePairID: String?
     @Published private(set) var pairStatus: String?
@@ -83,7 +91,12 @@ final class PairingStore: ObservableObject {
     /// 기록 준비가 실패한 페어. 리스너가 같은 실패를 무한히 재시도하지 않도록,
     /// 사용자가 상세 화면을 다시 열거나 '다시 분석하기'를 누를 때까지 자동 재시도를 멈춥니다.
     private var failedPreparationPairIDs: Set<String> = []
+    private var analysisStartedAt: [String: Date] = [:]
+    private var analysisTrigger: [String: String] = [:]
     private var resultListener: ListenerRegistration?
+    /// 홈의 친구 목록과 기준일 확인 요청을 모든 연결에서 실시간으로 갱신합니다.
+    private var friendPairsListener: ListenerRegistration?
+    private var friendPairsListenerUserID: String?
     /// 사진 스캔 결과를 읽어 오는 곳. ContentView가 앱 시작 시 연결합니다.
     weak var photoAnalyzer: PhotoLibraryAnalyzer?
     /// 마지막으로 연 상세 화면의 페어. 늦게 끝난 openPair가 다른 친구 화면을 덮어쓰지 않게 합니다.
@@ -91,6 +104,8 @@ final class PairingStore: ObservableObject {
     /// 앱 시작 시 최근 연결을 찾는 비동기 조회의 식별자입니다.
     /// 사용자가 그 사이 친구 상세를 열면 해당 조회를 무효화해 선택한 친구를 덮어쓰지 않게 합니다.
     private var latestPairLoadToken: UUID?
+    private var joinInviteCodeSource = "manual"
+    private var isApplyingInviteCodeProgrammatically = false
 
     var isWorking: Bool { state == .working }
 
@@ -119,12 +134,31 @@ final class PairingStore: ObservableObject {
             && firstMetProposedBy != userID
     }
 
+    func pendingFirstMetDateRequests(userID: String) -> [FriendConnectionSummary] {
+        friendSummaries
+            .filter {
+                $0.firstMetStatus == "pending"
+                    && $0.firstMetProposedBy != nil
+                    && $0.firstMetProposedBy != userID
+            }
+            .sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+    }
+
     func clearOperationError() {
         if case .failed = state { state = .idle }
     }
 
+    func applyInviteCode(_ code: String, source: String) {
+        isApplyingInviteCodeProgrammatically = true
+        joinInviteID = normalizedInviteID(code)
+        isApplyingInviteCodeProgrammatically = false
+        joinInviteCodeSource = source
+        clearOperationError()
+    }
+
     func loadLatestPair(userID: String) async {
         currentUserID = userID
+        listenToFriendPairs(userID: userID)
         let loadToken = UUID()
         latestPairLoadToken = loadToken
         do {
@@ -232,6 +266,8 @@ final class PairingStore: ObservableObject {
     }
 
     func disconnectPair(pairID: String, userID: String) async {
+        let hadResult = resultCache[pairID] != nil
+            || friendSummaries.first(where: { $0.id == pairID })?.hasStoredResult == true
         state = .working
         do {
             let selectedPair = try await database.collection("pairs").document(pairID)
@@ -300,6 +336,7 @@ final class PairingStore: ObservableObject {
                     ? "중복 연결을 포함해 이 친구와의 연결을 모두 해제했어요."
                     : "연결을 해제했어요."
             )
+            AnalyticsTracker.log("pair_disconnected", parameters: ["had_result": hadResult])
         } catch {
             state = .failed(message: userFacingMessage(for: error))
         }
@@ -318,11 +355,13 @@ final class PairingStore: ObservableObject {
         }
 
         state = .working
+        let isFirstSave = savedProfileNickname == nil
 
         do {
             try await saveProfileSilently(userID: userID, nickname: trimmedNickname)
             nickname = trimmedNickname
             state = .succeeded(message: "프로필을 저장했어요.")
+            AnalyticsTracker.log("profile_saved", parameters: ["is_first_save": isFirstSave])
             return true
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -368,6 +407,9 @@ final class PairingStore: ObservableObject {
             creatorID = userID
             pairStatus = "친구의 수락을 기다리고 있어요."
             state = .succeeded(message: "새 초대 코드를 만들었어요.")
+            AnalyticsTracker.log("invite_created", parameters: [
+                "is_refresh": previousInviteID != nil
+            ])
             listenToPair(documentID: pairID)
 
             // 예전 초대 정리와 내 멤버 문서 준비는 새 코드 표시를 막지 않도록 뒤에서 처리합니다.
@@ -386,6 +428,9 @@ final class PairingStore: ObservableObject {
             }
         } catch {
             state = .failed(message: userFacingMessage(for: error))
+            AnalyticsTracker.log("invite_create_failed", parameters: [
+                "error_code": AnalyticsTracker.errorCode(error)
+            ])
         }
     }
 
@@ -397,6 +442,7 @@ final class PairingStore: ObservableObject {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
         }
+        AnalyticsTracker.log("invite_code_submitted", parameters: ["code_source": joinInviteCodeSource])
         isPreviewingInvite = true
         defer { isPreviewingInvite = false }
         state = .working
@@ -405,10 +451,12 @@ final class PairingStore: ObservableObject {
                 .getDocument(source: .server)
             guard let data = snapshot.data() else {
                 state = .failed(message: "없는 초대 코드예요. 코드를 다시 확인해 주세요.")
+                AnalyticsTracker.log("pair_connect_failed", parameters: ["error_code": "invite_invalid"])
                 return false
             }
             if isExpired(data) {
                 state = .failed(message: "만료된 초대 코드예요. 새 코드를 받아 주세요.")
+                AnalyticsTracker.log("pair_connect_failed", parameters: ["error_code": "invite_expired"])
                 return false
             }
             guard data["status"] as? String == "waiting",
@@ -419,6 +467,7 @@ final class PairingStore: ObservableObject {
             }
             guard try await !hasExistingActivePair(userID: userID, friendID: creator) else {
                 state = .failed(message: "이미 연결된 친구예요. 기존 친구 목록에서 결과를 확인해 주세요.")
+                AnalyticsTracker.log("pair_connect_failed", parameters: ["error_code": "already_connected"])
                 return false
             }
             inviteCreatorNickname = data["creatorNickname"] as? String ?? "친구"
@@ -427,6 +476,9 @@ final class PairingStore: ObservableObject {
             return true
         } catch {
             state = .failed(message: inviteAcceptanceMessage(for: error))
+            AnalyticsTracker.log("pair_connect_failed", parameters: [
+                "error_code": AnalyticsTracker.errorCode(error)
+            ])
             return false
         }
     }
@@ -543,6 +595,7 @@ final class PairingStore: ObservableObject {
             // 이후 기준일이 확정됐을 때 자동 분석이 막히지 않습니다.
             resultLookupCompletedPairIDs.insert(pairID)
             state = .succeeded(message: "친구와 연결됐어요.")
+            AnalyticsTracker.logPairConnectedOnce(localPairID: pairID, role: "receiver")
             listenToPair(documentID: pairID)
             let myNickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
             Task { [weak self] in
@@ -560,6 +613,9 @@ final class PairingStore: ObservableObject {
             return true
         } catch {
             state = .failed(message: inviteAcceptanceMessage(for: error))
+            AnalyticsTracker.log("pair_connect_failed", parameters: [
+                "error_code": AnalyticsTracker.errorCode(error)
+            ])
             return false
         }
     }
@@ -569,6 +625,8 @@ final class PairingStore: ObservableObject {
     @discardableResult
     func proposeFirstMetDate(pairID: String, userID: String) async -> Bool {
         currentUserID = userID
+        let hadPreviousResult = resultCache[pairID] != nil
+            || friendSummaries.first(where: { $0.id == pairID })?.hasStoredResult == true
         let normalizedDate = Calendar.current.startOfDay(for: firstMetDate)
         guard normalizedDate <= Calendar.current.startOfDay(for: Date()) else {
             state = .failed(message: "처음 알게 된 날은 오늘 이후로 정할 수 없어요.")
@@ -602,7 +660,8 @@ final class PairingStore: ObservableObject {
             clearStoredResultState(
                 pairID: pairID,
                 firstMetDate: normalizedDate,
-                firstMetStatus: "pending"
+                firstMetStatus: "pending",
+                firstMetProposedBy: userID
             )
             resultLookupCompletedPairIDs.insert(pairID)
             failedPreparationPairIDs.remove(pairID)
@@ -612,6 +671,13 @@ final class PairingStore: ObservableObject {
             analysisNeedsRestart = false
             analysisProgress = 0
             state = .succeeded(message: "기준일을 제안했어요. 친구의 확인을 기다리고 있어요.")
+            analysisTrigger[pairID] = hadPreviousResult ? "date_change" : "automatic"
+            AnalyticsTracker.log(
+                hadPreviousResult ? "first_met_date_changed" : "first_met_date_proposed",
+                parameters: hadPreviousResult
+                    ? ["has_previous_result": true]
+                    : ["role": "proposer"]
+            )
             return true
         } catch {
             state = .failed(message: userFacingMessage(for: error))
@@ -638,6 +704,7 @@ final class PairingStore: ObservableObject {
             activePairID = pairID
             firstMetStatus = "confirmed"
             state = .succeeded(message: "두 사람이 기준일을 확인했어요. 기록을 자동으로 준비할게요.")
+            AnalyticsTracker.log("first_met_date_confirmed", parameters: ["role": "confirmer"])
             scheduleAutomaticAnalysis()
             return true
         } catch {
@@ -667,6 +734,10 @@ final class PairingStore: ObservableObject {
         guard !preparedKeys.contains(key) else { return }
 
         let token = UUID()
+        analysisStartedAt[pairID] = Date()
+        AnalyticsTracker.log("comparison_started", parameters: [
+            "trigger": analysisTrigger[pairID] ?? "automatic"
+        ])
         let task = Task<Void, Never> { [weak self] in
             guard let self else { return }
             defer {
@@ -828,6 +899,10 @@ final class PairingStore: ObservableObject {
                 isWaitingForRecords = false
                 state = .failed(message: userFacingMessage(for: error))
             }
+            AnalyticsTracker.log("comparison_failed", parameters: [
+                "error_code": AnalyticsTracker.errorCode(error),
+                "stage": "record_preparation"
+            ])
             return false
         }
     }
@@ -992,6 +1067,13 @@ final class PairingStore: ObservableObject {
             clearLocalAnalysisCancellation(pairID: pairID)
             updateFriendSummary(pairID: pairID, result: result, firstMetDate: cutoffDate)
             completedAnalysisCount += 1
+            AnalyticsTracker.log("comparison_completed", parameters: [
+                "duration_bucket": AnalyticsTracker.durationBucket(
+                    Date().timeIntervalSince(analysisStartedAt[pairID] ?? Date())
+                ),
+                "result_type": intersections.isEmpty ? "no_match" : "matched",
+                "score_bucket": AnalyticsTracker.scoreBucket(result.score)
+            ])
 
             guard isDisplaying(pairID) else { return }
             comparisonResult = result
@@ -1008,12 +1090,19 @@ final class PairingStore: ObservableObject {
             // 새 기준일 상태는 pair 리스너가 이어서 반영하므로 오류 화면을 띄우지 않습니다.
             return
         } catch {
-            guard isCurrentRun(generation, pairID: pairID), isDisplaying(pairID) else { return }
-            state = .failed(message: userFacingMessage(for: error))
+            guard isCurrentRun(generation, pairID: pairID) else { return }
+            if isDisplaying(pairID) {
+                state = .failed(message: userFacingMessage(for: error))
+            }
+            AnalyticsTracker.log("comparison_failed", parameters: [
+                "error_code": AnalyticsTracker.errorCode(error),
+                "stage": "comparison"
+            ])
         }
     }
 
     func cancelAnalysis(pairID: String, userID: String) async {
+        let cancelledProgress = analysisProgress
         beginAnalysisGeneration(pairID: pairID)
         stopPreparation(pairID: pairID)
         cancelledAnalysisPairIDs.insert(pairID)
@@ -1025,9 +1114,15 @@ final class PairingStore: ObservableObject {
         analysisMessage = "분석을 취소했어요."
         state = .succeeded(message: "분석을 취소했어요.")
         await markMemberAnalysisCancelled(pairID: pairID, userID: userID)
+        AnalyticsTracker.log("comparison_cancelled", parameters: [
+            "progress_bucket": AnalyticsTracker.progressBucket(cancelledProgress)
+        ])
     }
 
     func restartAnalysis(pairID: String) {
+        let previousErrorCode = failedPreparationPairIDs.contains(pairID)
+            ? "record_preparation_failed"
+            : "unknown"
         beginAnalysisGeneration(pairID: pairID)
         stopPreparation(pairID: pairID)
         failedPreparationPairIDs.remove(pairID)
@@ -1038,6 +1133,10 @@ final class PairingStore: ObservableObject {
         isWaitingForRecords = false
         analysisMessage = "사진에 남은 시간과 위치 정보를 다시 확인하고 있어요."
         state = .working
+        analysisTrigger[pairID] = "retry"
+        AnalyticsTracker.log("comparison_retried", parameters: [
+            "previous_error_code": previousErrorCode
+        ])
         analysisRunRevision += 1
         scheduleAutomaticAnalysis()
     }
@@ -1051,6 +1150,11 @@ final class PairingStore: ObservableObject {
     /// 사진을 읽을 수 없어 기록 준비를 시작하지 못할 때 다시 시작 화면으로 돌려보냅니다.
     func reportAnalysisUnavailable(pairID: String, message: String) {
         failedPreparationPairIDs.insert(pairID)
+        AnalyticsTracker.log("photo_scan_failed", parameters: [
+            "error_code": photoAnalyzer?.canReadPhotos == true
+                ? "record_preparation_failed"
+                : "permission_denied"
+        ])
         guard isDisplaying(pairID), comparisonResult == nil else { return }
         analysisNeedsRestart = true
         analysisRestartMessage = message
@@ -1322,7 +1426,8 @@ final class PairingStore: ObservableObject {
                         self.clearStoredResultState(
                             pairID: pairID,
                             firstMetDate: self.savedFirstMetDate,
-                            firstMetStatus: self.firstMetStatus
+                            firstMetStatus: self.firstMetStatus,
+                            firstMetProposedBy: self.firstMetProposedBy
                         )
                         self.resultLookupCompletedPairIDs.insert(pairID)
                         return
@@ -1504,6 +1609,8 @@ final class PairingStore: ObservableObject {
                 firstMetDate: (data["firstMetAt"] as? Timestamp)?.dateValue(),
                 firstMetStatus: data["firstMetStatus"] as? String
                     ?? ((data["firstMetAt"] as? Timestamp) == nil ? nil : "confirmed"),
+                firstMetProposedBy: data["firstMetProposedBy"] as? String,
+                updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue(),
                 hasStoredResult: hasStoredResult,
                 isReady: memberIsReady(memberData)
             )
@@ -1588,6 +1695,12 @@ final class PairingStore: ObservableObject {
             joinInviteID = ""
             pairStatus = "친구와 연결됐어요."
             if isNewConnection {
+                AnalyticsTracker.logPairConnectedOnce(
+                    localPairID: documentID,
+                    role: creatorID == currentUserID ? "sender" : "receiver"
+                )
+            }
+            if isNewConnection {
                 connectedFriendNickname = friendSummaries.first(where: { $0.id == documentID })?.nickname ?? "친구"
             }
             if !resultLookupCompletedPairIDs.contains(documentID),
@@ -1630,6 +1743,7 @@ final class PairingStore: ObservableObject {
         if let timestamp = data["firstMetAt"] as? Timestamp {
             let date = timestamp.dateValue()
             let nextFirstMetStatus = data["firstMetStatus"] as? String ?? "confirmed"
+            let nextFirstMetProposedBy = data["firstMetProposedBy"] as? String
             let dateChanged = previousFirstMetDate.map { $0 != date } ?? false
             let returnedToPending = previousFirstMetStatus == "confirmed"
                 && nextFirstMetStatus == "pending"
@@ -1648,17 +1762,19 @@ final class PairingStore: ObservableObject {
                 clearStoredResultState(
                     pairID: documentID,
                     firstMetDate: date,
-                    firstMetStatus: nextFirstMetStatus
+                    firstMetStatus: nextFirstMetStatus,
+                    firstMetProposedBy: nextFirstMetProposedBy
                 )
             }
             firstMetDate = date
             savedFirstMetDate = date
             firstMetStatus = nextFirstMetStatus
-            firstMetProposedBy = data["firstMetProposedBy"] as? String
+            firstMetProposedBy = nextFirstMetProposedBy
             updateFriendSummaryFirstMetState(
                 pairID: documentID,
                 firstMetDate: date,
                 firstMetStatus: nextFirstMetStatus,
+                firstMetProposedBy: nextFirstMetProposedBy,
                 clearResult: dateChanged || nextFirstMetStatus == "pending"
             )
         } else {
@@ -1698,9 +1814,29 @@ final class PairingStore: ObservableObject {
             closestStrength: previous.closestStrength,
             firstMetDate: previous.firstMetDate,
             firstMetStatus: previous.firstMetStatus,
+            firstMetProposedBy: previous.firstMetProposedBy,
+            updatedAt: previous.updatedAt,
             hasStoredResult: previous.hasStoredResult,
             isReady: previous.isReady
         )
+    }
+
+    private func listenToFriendPairs(userID: String) {
+        guard friendPairsListenerUserID != userID || friendPairsListener == nil else { return }
+        friendPairsListener?.remove()
+        friendPairsListenerUserID = userID
+        friendPairsListener = database.collection("pairs")
+            .whereField("memberIds", arrayContains: userID)
+            .addSnapshotListener { [weak self] snapshot, error in
+                guard error == nil, let documents = snapshot?.documents else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.currentUserID == userID else { return }
+                    self.friendSummaries = await self.loadFriendSummaries(
+                        userID: userID,
+                        pairs: documents
+                    )
+                }
+            }
     }
 
     private func listenToPair(documentID: String) {
@@ -1996,6 +2132,8 @@ final class PairingStore: ObservableObject {
             closestStrength: result.closestIntersection?.strength,
             firstMetDate: firstMetDate,
             firstMetStatus: "confirmed",
+            firstMetProposedBy: previous.firstMetProposedBy,
+            updatedAt: previous.updatedAt,
             hasStoredResult: true,
             isReady: true
         )
@@ -2012,13 +2150,15 @@ final class PairingStore: ObservableObject {
     private func clearStoredResultState(
         pairID: String,
         firstMetDate: Date?,
-        firstMetStatus: String?
+        firstMetStatus: String?,
+        firstMetProposedBy: String?
     ) {
         resultCache[pairID] = nil
         updateFriendSummaryFirstMetState(
             pairID: pairID,
             firstMetDate: firstMetDate,
             firstMetStatus: firstMetStatus,
+            firstMetProposedBy: firstMetProposedBy,
             clearResult: true
         )
         guard isDisplaying(pairID) else { return }
@@ -2030,6 +2170,7 @@ final class PairingStore: ObservableObject {
         pairID: String,
         firstMetDate: Date?,
         firstMetStatus: String?,
+        firstMetProposedBy: String?,
         clearResult: Bool
     ) {
         guard let index = friendSummaries.firstIndex(where: { $0.id == pairID }) else { return }
@@ -2042,6 +2183,8 @@ final class PairingStore: ObservableObject {
             closestStrength: clearResult ? nil : previous.closestStrength,
             firstMetDate: firstMetDate,
             firstMetStatus: firstMetStatus,
+            firstMetProposedBy: firstMetProposedBy,
+            updatedAt: previous.updatedAt,
             hasStoredResult: clearResult ? false : previous.hasStoredResult,
             isReady: previous.isReady
         )

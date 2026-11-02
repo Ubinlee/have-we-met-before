@@ -9,6 +9,9 @@ struct ContentView: View {
     @EnvironmentObject private var firebaseSession: FirebaseSession
     @State private var onboardingStep: OnboardingStep = .start
     @State private var activeSheet: HomeSheet?
+    @State private var onboardingStartedAt = Date()
+    @State private var didLogOnboardingStarted = false
+    @State private var pendingInviteCode: String?
 
     var body: some View {
         Group {
@@ -20,12 +23,29 @@ struct ContentView: View {
                     analyzer: analyzer,
                     pairing: pairing,
                     firebaseSession: firebaseSession,
-                    onFinished: { didFinishOnboarding = true }
+                    onFinished: {
+                        AnalyticsTracker.log("onboarding_completed", parameters: [
+                            "duration_bucket": AnalyticsTracker.durationBucket(
+                                Date().timeIntervalSince(onboardingStartedAt)
+                            )
+                        ])
+                        didFinishOnboarding = true
+                    }
                 )
             }
         }
         .tint(AppTheme.primary)
         .preferredColorScheme(.light)
+        .onAppear {
+            guard !didFinishOnboarding, !didLogOnboardingStarted else { return }
+            onboardingStartedAt = Date()
+            didLogOnboardingStarted = true
+            AnalyticsTracker.log("onboarding_started")
+        }
+        .onOpenURL(perform: handleIncomingURL)
+        .onChange(of: didFinishOnboarding) { _, finished in
+            if finished { presentPendingInviteIfPossible() }
+        }
     }
 
     private var home: some View {
@@ -49,9 +69,11 @@ struct ContentView: View {
                         userID: userID,
                         onInvite: { activeSheet = .invite },
                         onJoin: { activeSheet = .join },
+                        onNotifications: { activeSheet = .notifications },
                         onSettings: { activeSheet = .settings },
                         onManage: { activeSheet = .manage }
                     )
+                    .onAppear { presentPendingInviteIfPossible() }
                     .task(id: userID) {
                         // 분석 작업은 store가 소유하므로 사진 스캔 결과를 읽을 수 있게 연결합니다.
                         pairing.photoAnalyzer = analyzer
@@ -78,6 +100,21 @@ struct ContentView: View {
         }
     }
 
+    private func handleIncomingURL(_ url: URL) {
+        guard let code = InviteLink.inviteCode(from: url) else { return }
+        pendingInviteCode = code
+        pairing.applyInviteCode(code, source: "deep_link")
+        AnalyticsTracker.log("invite_link_opened")
+        presentPendingInviteIfPossible()
+    }
+
+    private func presentPendingInviteIfPossible() {
+        guard didFinishOnboarding, let code = pendingInviteCode else { return }
+        pairing.applyInviteCode(code, source: "deep_link")
+        pendingInviteCode = nil
+        activeSheet = .join
+    }
+
     @ViewBuilder
     private func sheetContent(_ sheet: HomeSheet, userID: String) -> some View {
         switch sheet {
@@ -85,6 +122,8 @@ struct ContentView: View {
             InviteCreateView(pairing: pairing, userID: userID)
         case .join:
             InviteJoinFlowView(pairing: pairing, userID: userID)
+        case .notifications:
+            InAppNotificationCenterView(pairing: pairing, userID: userID)
         case .settings:
             SettingsView(
                 nickname: pairing.nickname,
@@ -115,7 +154,7 @@ private enum OnboardingStep {
 }
 
 private enum HomeSheet: String, Identifiable {
-    case invite, join, settings, manage
+    case invite, join, notifications, settings, manage
     var id: String { rawValue }
 }
 
@@ -263,7 +302,7 @@ private struct OnboardingFlowView: View {
                 infoTitle: "먼저 확인해 주세요",
                 infoMessage: "인터넷 연결과 기기 저장 공간을 확인해 주세요."
             ) {
-                startPhotoAnalysis()
+                startPhotoAnalysis(trigger: "retry")
             } secondaryAction: {
                 step = .start
             }
@@ -364,11 +403,11 @@ private struct OnboardingFlowView: View {
         return "\(formatter.string(from: first))–\(formatter.string(from: last))"
     }
 
-    private func startPhotoAnalysis() {
+    private func startPhotoAnalysis(trigger: String = "onboarding") {
         step = .scanning
         Task {
             if analyzer.canReadPhotos {
-                await analyzer.scan()
+                await analyzer.scan(trigger: trigger)
             } else {
                 await analyzer.requestAccessAndScan()
             }
@@ -403,8 +442,13 @@ private struct HomeView: View {
     let userID: String
     let onInvite: () -> Void
     let onJoin: () -> Void
+    let onNotifications: () -> Void
     let onSettings: () -> Void
     let onManage: () -> Void
+
+    private var pendingRequests: [FriendConnectionSummary] {
+        pairing.pendingFirstMetDateRequests(userID: userID)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -417,9 +461,35 @@ private struct HomeView: View {
                         .foregroundStyle(AppTheme.secondaryText)
                 }
                 Spacer()
-                Button(action: onSettings) { Image(systemName: "gearshape") }
+                HStack(spacing: 16) {
+                    Button {
+                        AnalyticsTracker.log("notification_center_opened", parameters: [
+                            "pending_count": pendingRequests.count
+                        ])
+                        onNotifications()
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: pendingRequests.isEmpty ? "bell" : "bell.fill")
+                                .font(.system(size: 18))
+                            if !pendingRequests.isEmpty {
+                                Text("\(min(pendingRequests.count, 9))")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(minWidth: 15, minHeight: 15)
+                                    .background(AppTheme.primary)
+                                    .clipShape(Circle())
+                                    .offset(x: 7, y: -7)
+                            }
+                        }
+                    }
                     .buttonStyle(.plain)
-                    .foregroundStyle(AppTheme.secondaryText)
+                    .foregroundStyle(pendingRequests.isEmpty ? AppTheme.secondaryText : AppTheme.primary)
+                    .accessibilityLabel("알림 \(pendingRequests.count)개")
+
+                    Button(action: onSettings) { Image(systemName: "gearshape") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppTheme.secondaryText)
+                }
             }
 
             HStack {
@@ -447,6 +517,35 @@ private struct HomeView: View {
                 .background(.white)
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay { RoundedRectangle(cornerRadius: 9).stroke(AppTheme.divider) }
+            }
+
+            if let request = pendingRequests.first {
+                Button {
+                    AnalyticsTracker.log("first_met_request_opened", parameters: ["source": "home_banner"])
+                    onNotifications()
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "calendar.badge.exclamationmark")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(AppTheme.primary)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(request.nickname)님이 기준일 확인을 요청했어요")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(AppTheme.text)
+                            Text("날짜를 확인하면 두 사람의 분석이 시작돼요.")
+                                .font(.system(size: 11))
+                                .foregroundStyle(AppTheme.secondaryText)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+                    .padding(14)
+                    .background(AppTheme.primarySoft)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                }
+                .buttonStyle(.plain)
             }
 
             if pairing.friendSummaries.isEmpty {
@@ -583,7 +682,11 @@ private struct InviteCreateView: View {
                     .disabled(pairing.isCreatingInvite || !pairing.hasValidNickname)
                     .opacity(pairing.isCreatingInvite || !pairing.hasValidNickname ? 0.35 : 1)
                 } else {
-                    ShareLink(item: "본 적 있나? 초대 코드: \(pairing.inviteID)") {
+                    ShareLink(
+                        item: InviteLink.shareURL(code: pairing.inviteID),
+                        subject: Text("본 적 있나?"),
+                        message: Text("나와 만나기 전에도 가까이 있었는지 확인해 봐요. 초대 코드: \(pairing.inviteID)")
+                    ) {
                         Text("초대 메시지 공유")
                     }
                     .buttonStyle(PrimaryActionButtonStyle())
@@ -1055,6 +1158,95 @@ private struct FriendDetailFlowView: View {
         await pairing.openPair(pairID: friend.id, userID: userID)
         if case .failed(let message) = pairing.state { loadError = message }
         didLoad = true
+    }
+}
+
+private struct InAppNotificationCenterView: View {
+    @ObservedObject var pairing: PairingStore
+    let userID: String
+    @Environment(\.dismiss) private var dismiss
+
+    private var requests: [FriendConnectionSummary] {
+        pairing.pendingFirstMetDateRequests(userID: userID)
+    }
+
+    var body: some View {
+        NavigationStack {
+            FlowScreen(
+                title: "알림",
+                message: requests.isEmpty
+                    ? "새로운 요청이 도착하면 이곳에서 확인할 수 있어요."
+                    : "친구가 보낸 기준일 확인 요청을 확인해 주세요.",
+                backAction: { dismiss() }
+            ) {
+                if requests.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "bell.slash")
+                            .font(.system(size: 28))
+                            .foregroundStyle(AppTheme.secondaryText)
+                        Text("새 알림이 없어요")
+                            .font(.system(size: 15, weight: .bold))
+                        Text("기준일 확인 요청이 오면 알려드릴게요.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
+                    .padding(.top, 28)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(requests) { request in
+                            NavigationLink {
+                                FriendDetailFlowView(
+                                    pairing: pairing,
+                                    friend: request,
+                                    userID: userID
+                                )
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "calendar.badge.exclamationmark")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundStyle(AppTheme.primary)
+                                        .frame(width: 28)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("\(request.nickname)님의 기준일 확인 요청")
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundStyle(AppTheme.text)
+                                        if let date = request.firstMetDate {
+                                            Text("처음 알게 된 날 · \(date.formatted(.dateTime.year().month().day()))")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(AppTheme.secondaryText)
+                                        }
+                                    }
+                                    Spacer()
+                                    Circle()
+                                        .fill(AppTheme.primary)
+                                        .frame(width: 7, height: 7)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(AppTheme.secondaryText)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 16)
+                            }
+                            .buttonStyle(.plain)
+                            .simultaneousGesture(TapGesture().onEnded {
+                                AnalyticsTracker.log(
+                                    "first_met_request_opened",
+                                    parameters: ["source": "notification_center"]
+                                )
+                            })
+                            if request.id != requests.last?.id { Divider() }
+                        }
+                    }
+                    .background(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                    .overlay { RoundedRectangle(cornerRadius: 9).stroke(AppTheme.divider) }
+                    .padding(.top, 28)
+                }
+                Spacer()
+            }
+        }
     }
 }
 
