@@ -18,6 +18,7 @@ struct FriendConnectionSummary: Identifiable, Sendable {
 
 @MainActor
 final class PairingStore: ObservableObject {
+    static let reviewDemoCode = "REVIEW"
     private static let recordSchemaVersion = 3
     private static let resultSchemaVersion = 4
     /// 교차 날짜는 두 기기의 시간대와 상관없이 같은 기준으로 셉니다.
@@ -110,9 +111,13 @@ final class PairingStore: ObservableObject {
     var isWorking: Bool { state == .working }
 
     var canPreviewInvite: Bool {
-        hasValidNickname
-            && isValidInviteCode(normalizedInviteID(joinInviteID))
-            && !isPreviewingInvite
+        !isPreviewingInvite
+            && (isReviewDemoCode
+                || (hasValidNickname && isValidInviteCode(normalizedInviteID(joinInviteID))))
+    }
+
+    var isReviewDemoCode: Bool {
+        normalizedInviteID(joinInviteID) == Self.reviewDemoCode
     }
 
     var hasValidNickname: Bool {
@@ -438,6 +443,11 @@ final class PairingStore: ObservableObject {
         guard !isPreviewingInvite else { return false }
         currentUserID = userID
         let pairID = normalizedInviteID(joinInviteID)
+        if pairID == Self.reviewDemoCode {
+            inviteCreatorNickname = "리뷰 친구"
+            state = .succeeded(message: "심사용 데모를 준비했어요.")
+            return true
+        }
         guard isValidInviteCode(pairID) else {
             state = .failed(message: "6자리 초대 코드를 입력해 주세요.")
             return false
@@ -2016,7 +2026,8 @@ final class PairingStore: ObservableObject {
     }
 
     func isValidInviteCodeFormat(_ value: String) -> Bool {
-        isValidInviteCode(normalizedInviteID(value))
+        let normalized = normalizedInviteID(value)
+        return normalized == Self.reviewDemoCode || isValidInviteCode(normalized)
     }
 
     private func normalizedInviteID(_ value: String) -> String {

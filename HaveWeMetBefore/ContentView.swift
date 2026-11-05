@@ -701,7 +701,7 @@ private struct InviteCreateView: View {
 }
 
 private struct InviteJoinFlowView: View {
-    enum Stage { case code, consent, date }
+    enum Stage { case code, consent, date, reviewDemo }
     @ObservedObject var pairing: PairingStore
     let userID: String
     @Environment(\.dismiss) private var dismiss
@@ -717,6 +717,7 @@ private struct InviteJoinFlowView: View {
             case .code: codeScreen
             case .consent: consentScreen
             case .date: dateScreen
+            case .reviewDemo: ReviewDemoFlowView(onExit: { dismiss() })
             }
         }
     }
@@ -783,6 +784,10 @@ private struct InviteJoinFlowView: View {
             operationMessage
             Spacer()
             Button(pairing.isAcceptingInvite ? "연결 중..." : "연결하기") {
+                if pairing.isReviewDemoCode {
+                    stage = .reviewDemo
+                    return
+                }
                 let pairID = pairing.joinInviteID
                 Task {
                     if await pairing.acceptPair(userID: userID) {
@@ -810,7 +815,7 @@ private struct InviteJoinFlowView: View {
 
     /// '확인' 버튼이 왜 눌리지 않는지 알려 줍니다.
     @ViewBuilder private var codeHint: some View {
-        if !pairing.hasValidNickname {
+        if !pairing.hasValidNickname, !pairing.isReviewDemoCode {
             Text("위에서 닉네임(1~12자)을 먼저 입력해 주세요.")
                 .font(.caption).foregroundStyle(AppTheme.secondaryText).padding(.top, 10)
         } else if typedCode.count == 6, !pairing.isValidInviteCodeFormat(typedCode) {
@@ -823,6 +828,254 @@ private struct InviteJoinFlowView: View {
         if case .failed(let message) = pairing.state {
             Text(message).font(.caption).foregroundStyle(.red).padding(.top, 10)
         }
+    }
+}
+
+/// App Review가 한 기기에서도 연결 이후의 핵심 기능을 확인할 수 있는 로컬 전용 데모입니다.
+/// 실제 사용자·사진·Firestore 데이터에는 쓰지 않습니다.
+private struct ReviewDemoFlowView: View {
+    private enum Stage { case dateEntry, dateConfirmation, analysis, result }
+
+    let onExit: () -> Void
+    @State private var stage: Stage = .dateEntry
+    @State private var firstMetDate = ReviewDemoData.firstMetDate
+    @State private var progress = 0.12
+
+    var body: some View {
+        Group {
+            switch stage {
+            case .dateEntry:
+                dateEntry
+            case .dateConfirmation:
+                dateConfirmation
+            case .analysis:
+                analysis
+            case .result:
+                ResultView(
+                    result: ReviewDemoData.result,
+                    firstMetDate: firstMetDate,
+                    firstNickname: "리뷰어",
+                    secondNickname: "리뷰 친구",
+                    onEditFirstMetDate: { stage = .dateEntry },
+                    onHome: onExit
+                )
+            }
+        }
+        .onAppear {
+            AnalyticsTracker.log("review_demo_started", parameters: ["source": "invite_code"])
+        }
+    }
+
+    private var dateEntry: some View {
+        FlowScreen(
+            title: "리뷰 친구와 연결됐어요",
+            message: "심사용 데모에서는 한 기기에서 기준일 확인부터 결과까지 살펴볼 수 있어요.",
+            backAction: onExit
+        ) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("처음 알게 된 날")
+                    .font(.system(size: 13, weight: .semibold))
+                DatePicker(
+                    "처음 알게 된 날",
+                    selection: $firstMetDate,
+                    in: ...Date(),
+                    displayedComponents: .date
+                )
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .tint(AppTheme.primary)
+            }
+            .padding(.top, 24)
+            Spacer()
+            Button("기준일 확인 요청 보기") {
+                stage = .dateConfirmation
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+        }
+    }
+
+    private var dateConfirmation: some View {
+        FlowScreen(
+            title: "리뷰 친구님이 처음 알게 된\n날을 입력했어요",
+            message: "날짜가 맞으면 동의해 주세요. 동의하면 바로 분석을 시작해요.",
+            backAction: { stage = .dateEntry }
+        ) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("친구가 입력한 기준일")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(AppTheme.secondaryText)
+                Text(firstMetDate, format: .dateTime.year().month().day())
+                    .font(.system(size: 20, weight: .bold))
+            }
+            .padding(.top, 32)
+            Text("이 날짜 이전의 흐린 시간·위치 메타데이터만 비교하며 사진 원본은 사용하지 않아요.")
+                .font(.system(size: 12))
+                .foregroundStyle(AppTheme.secondaryText)
+                .padding(.top, 24)
+            Spacer()
+            Button("동의하고 분석 시작") {
+                progress = 0.12
+                stage = .analysis
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            Button("날짜 수정하기") { stage = .dateEntry }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(AppTheme.secondaryText)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
+        }
+    }
+
+    private var analysis: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text("사진 분석")
+                    .font(.system(size: 15, weight: .bold))
+                HStack {
+                    Button { stage = .dateConfirmation } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 28, height: 28, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .frame(height: 44)
+
+            Spacer(minLength: 90)
+
+            ZStack {
+                Circle().stroke(AppTheme.divider, lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(AppTheme.primary, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.22), value: progress)
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.system(size: 36))
+                    .monospacedDigit()
+            }
+            .frame(width: 154, height: 154)
+
+            VStack(spacing: 8) {
+                Text("사진 기록을 살펴보고 있어요")
+                    .font(.system(size: 18, weight: .bold))
+                Text("심사용 샘플 시간·위치 기록을 비교하고 있어요.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(AppTheme.secondaryText)
+                Text("사진 원본은 사용하거나 업로드하지 않아요.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(AppTheme.primary)
+            }
+            .multilineTextAlignment(.center)
+            .padding(.top, 32)
+
+            Spacer()
+
+            Button("결과 바로 보기") {
+                stage = .result
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(AppTheme.secondaryText)
+            .padding(.bottom, 22)
+        }
+        .padding(.horizontal, 19)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(AppTheme.text)
+        .background(AppTheme.background.ignoresSafeArea())
+        .task {
+            for step in 1...11 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard !Task.isCancelled else { return }
+                progress = min(0.94, 0.12 + Double(step) * 0.075)
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            AnalyticsTracker.log("review_demo_completed")
+            stage = .result
+        }
+    }
+}
+
+private enum ReviewDemoData {
+    static let firstMetDate = makeDate(year: 2024, month: 5, day: 12, hour: 12)
+
+    static let result: DestinyScoreResult = {
+        let intersections = [
+            intersection(
+                id: "review-ewha",
+                year: 2023, month: 3, day: 18, hour: 14, minute: 10,
+                strength: .strong, distance: 280, timeDifference: 35 * 60,
+                latitude: 37.5568, longitude: 126.9463
+            ),
+            intersection(
+                id: "review-hongdae",
+                year: 2022, month: 10, day: 9, hour: 18, minute: 20,
+                strength: .close, distance: 650, timeDifference: 80 * 60,
+                latitude: 37.5572, longitude: 126.9244
+            ),
+            intersection(
+                id: "review-seongsu",
+                year: 2021, month: 5, day: 2, hour: 16, minute: 0,
+                strength: .loose, distance: 3_200, timeDifference: 4 * 60 * 60,
+                latitude: 37.5446, longitude: 127.0557
+            )
+        ]
+        return DestinyScoreResult(
+            score: 92,
+            closestIntersection: intersections[0],
+            totalIntersectionDayCount: 3,
+            additionalIntersectionDayCount: 2,
+            rankedIntersections: intersections
+        )
+    }()
+
+    private static func intersection(
+        id: String,
+        year: Int,
+        month: Int,
+        day: Int,
+        hour: Int,
+        minute: Int,
+        strength: IntersectionStrength,
+        distance: Double,
+        timeDifference: TimeInterval,
+        latitude: Double,
+        longitude: Double
+    ) -> TrajectoryIntersection {
+        let firstDate = makeDate(year: year, month: month, day: day, hour: hour, minute: minute)
+        return TrajectoryIntersection(
+            id: id,
+            firstRecordID: "\(id)-first",
+            secondRecordID: "\(id)-second",
+            firstCapturedAt: firstDate,
+            secondCapturedAt: firstDate.addingTimeInterval(timeDifference),
+            strength: strength,
+            distanceMeters: distance,
+            timeDifference: timeDifference,
+            approximateLatitude: latitude,
+            approximateLongitude: longitude
+        )
+    }
+
+    private static func makeDate(
+        year: Int,
+        month: Int,
+        day: Int,
+        hour: Int,
+        minute: Int = 0
+    ) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Seoul") ?? .current
+        return calendar.date(from: DateComponents(
+            year: year,
+            month: month,
+            day: day,
+            hour: hour,
+            minute: minute
+        )) ?? Date()
     }
 }
 
